@@ -388,42 +388,21 @@ class ImageViewer {
         };
         this.renderLabelTile = renderLabelTile;
 
-        // Default tile-loaded behavior: decode the raw tile bytes ourselves.
-        // OpenSeadragon 6.x exposes the underlying XHR on `e.tileRequest` (a
-        // stable, non-deprecated property) with `response` as an ArrayBuffer
-        // of the raw compressed tile (OSD uses responseType: "arraybuffer" for
-        // AJAX-loaded tiles), so no forked ImageJob is needed to reach it.
-        function tileLoadedDefault(e) {
-            const decoder = new Promise((resolve, reject) => {
-                const responseArray = e.tileRequest?.response;
-                if (!responseArray) {
-                    reject();
-                    return;
-                }
-                const img = window.UPNG.decode(responseArray);
-                if (img.ctype == 0 && img.depth == 16) {
-                    img.data = img.data.slice(0, 2 * img.width * img.height);
-                    e.tile._array = img.data;
-                    e.tile._format = "u16";
-                } else if (img.ctype == 6 && img.depth == 8) {
-                    img.data = img.data.slice(0, 4 * img.width * img.height);
-                    e.tile._array = img.data;
-                    e.tile._format = "u32";
-                }
-                resolve();
-            });
-            decoder.then(e.getCompletionCallback());
-        }
-
+        // tile-loaded handling: decode the raw tile bytes ourselves. OpenSeadragon
+        // 6.x exposes the underlying XHR on `e.tileRequest` (a stable, non-deprecated
+        // property) with `response` as an ArrayBuffer of the raw compressed tile (OSD
+        // uses responseType: "arraybuffer" for AJAX-loaded tiles), so no forked
+        // ImageJob is needed to reach it. Registered directly as an async function:
+        // OpenSeadragon awaits a handler's returned promise (raiseEventAwaiting) before
+        // considering the tile loaded, so no explicit getCompletionCallback() is needed.
         const forceRepaint = this.forceRepaint.bind(this);
-        const tileLoadedCustom = (callback, e) => {
+        const handleTileLoaded = async (e) => {
             const { source } = e.tiledImage;
             const { tileFormat } = source;
             try {
-                e.tile._blobUrl = e.image?.src;
+                const responseArray = e.tileRequest?.response;
                 if (tileFormat == 32) {
                     e.tile._isLabel = true;
-                    const responseArray = e.tileRequest?.response || e.image?._array;
                     if (!e.tile?._array && responseArray) {
                         const decoded = decodeLabelTile(responseArray);
                         e.tile._array = decoded.data;
@@ -431,10 +410,6 @@ class ImageViewer {
                         e.tile._renderedContext = renderLabelTile(decoded.data, decoded.width, decoded.height);
                     }
                     if (e.tile?._renderedContext) {
-                        const completion = e.getCompletionCallback?.();
-                        if (completion) {
-                            completion();
-                        }
                         return;
                     }
                 }
@@ -448,23 +423,28 @@ class ImageViewer {
                         e.tile._array = tile._array;
                     }
                     if (e.tile?._array) {
-                        return callback(e);
+                        return;
                     }
                 }
                 else if (tileFormat == 32) {
-                    if (e.tile?._array) {
-                        return callback(e);
-                    }
                     return;
                 }
-                else if (e?.tileRequest || e?.image) {
-                    return callback(e);
+                else if (responseArray) {
+                    const img = window.UPNG.decode(responseArray);
+                    if (img.ctype == 0 && img.depth == 16) {
+                        e.tile._array = img.data.slice(0, 2 * img.width * img.height);
+                        e.tile._format = "u16";
+                    } else if (img.ctype == 6 && img.depth == 8) {
+                        e.tile._array = img.data.slice(0, 4 * img.width * img.height);
+                        e.tile._format = "u32";
+                    }
                 }
             } catch (err) {
                 console.log("Load Error, Refreshing", err, e.tile.getUrl());
                 forceRepaint();
             }
         };
+
 
         this.viewer.addHandler("tile-drawn", (e) => {
             let count = _.size(e.tiledImage._tileCache._tilesLoaded);
@@ -478,9 +458,6 @@ class ImageViewer {
         });
 
         this.viewer.addHandler("tile-unloaded", (e) => {
-            if (e.tile._blobUrl) {
-                (window.URL || window.webkitURL).revokeObjectURL(e.tile._blobUrl);
-            }
             delete e.tile._array;
         });
 
@@ -494,7 +471,7 @@ class ImageViewer {
             via.height = via.height || this.config.tileHeight;
             via.updateShape(via.width, via.height);
             via.init().then(() => {
-                this.viewer.addHandler("tile-loaded", (e) => tileLoadedCustom(tileLoadedDefault, e));
+                this.viewer.addHandler("tile-loaded", handleTileLoaded);
                 this.viewer.addHandler("tile-drawing", (e) => tileDrawingCustom(tileDrawingDefault, e));
 
                 const world = this.viewer.world;
