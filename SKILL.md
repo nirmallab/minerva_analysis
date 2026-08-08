@@ -50,8 +50,10 @@ Frontend:
 - `minerva_analysis/client/src/js/main.js`: app initialization.
 - `minerva_analysis/client/src/js/services/dataLayer.js`: client API layer for server data/metadata/tile configuration.
 - `minerva_analysis/client/src/js/views/imageViewer.js`: OpenSeadragon viewer, tile loading, cache behavior, overlays, channel rendering.
+- `minerva_analysis/client/src/js/services/glRenderer.js`: owned WebGL2 tile-colorize/threshold engine (`GLRenderer` class — shader compile/link, texture upload). Ported from the `viawebgl` project's OpenSeadragon-independent core; this repo no longer depends on that package. See "OpenSeadragon Integration" below.
 - `minerva_analysis/client/src/js/views/csvGatingList.js`: CSV/gating UI behavior.
 - `minerva_analysis/client/templates/*.html`: Flask templates. `base.html` is especially important for base URL and frontend asset loading.
+- `minerva_analysis/client/external/openseadragon-bin-2.4.0/`: only `canvas-overlay-hd.js` (lasso/centroid canvas overlay), `openseadragon-scalebar.js` (scale bar + "download current view" export), and the toolbar icon image set remain here — both are third-party, unmaintained, single-file plugins loaded as plain `<script>` tags in `base.html`, not npm packages. The folder name is stale (real OpenSeadragon is now `client/package.json`'s `openseadragon` npm dependency, not a vendored 2.4.0 build) but was kept as-is rather than renamed. Do not put a new copy of the OpenSeadragon core JS file back in this folder.
 - `minerva_analysis/client/dist/vendor_bundle.js`: built frontend bundle that must be included in packages.
 
 Generated/local-only directories:
@@ -96,6 +98,16 @@ Datasource registration:
 - It uses `data_model.convertOmeTiff(...)` for image and segmentation metadata.
 - `copy=False` stores absolute paths and is preferred for large files on remote servers.
 
+## OpenSeadragon Integration
+
+OpenSeadragon is a real, current npm dependency (`client/package.json`'s `openseadragon`, currently `^6.1.0`) with matching `@types/openseadragon`. It used to come in through a chain of personal GitHub forks (`viawebgl` → a pinned-commit fork of OpenSeadragon reporting as 2.3.1) that existed for one reason: exposing raw AJAX tile bytes so the app could decode true 16-bit pixel data itself instead of losing precision through the browser's built-in 8-bit PNG decode. That fork chain was removed; if you see any reference to `viawebgl`, `thejohnhoffer/openseadragon`, or `window.viaWebGL` in old branches/history, treat it as gone, not current.
+
+- **Raw tile bytes**: `imageViewer.js`'s `handleTileLoaded` reads `e.tileRequest.response` (an `ArrayBuffer`) directly off the `tile-loaded` event — OpenSeadragon 6.x exposes the underlying XHR there as a stable, non-deprecated property, and uses `responseType: "arraybuffer"` for AJAX-loaded tiles, so no fork or custom `OpenSeadragon.converter` registration is needed. It's registered as an `async` function; OpenSeadragon awaits a handler's returned promise (`raiseEventAwaiting`) instead of needing an explicit `getCompletionCallback()`.
+- **WebGL colorize/threshold pass**: `client/src/js/services/glRenderer.js` (`GLRenderer` class) is a self-contained, OpenSeadragon-independent WebGL2 engine (shader compile/link, texture upload). `imageViewer.js` drives it directly via `viewer.addHandler('tile-drawing', ...)`, compositing the WebGL output onto the tile's 2D canvas.
+- **`drawer: 'canvas'` is required** in the `viewer_config` passed to `OpenSeadragon(...)` in `imageViewer.js`. The per-tile WebGL compositing depends on the `tile-drawing` event's 2D `rendered` canvas context, which is only guaranteed under the canvas drawer — OpenSeadragon 6's newer WebGL Drawer has no documented custom-shader hook as of 6.1. Don't change this to `'webgl'` or `'auto'` without re-verifying that assumption against whatever OpenSeadragon version is current at the time.
+- **Vendored plugins**: only `canvas-overlay-hd.js` (lasso/centroid overlay, `OpenSeadragon.CanvasOverlayHd`) and `openseadragon-scalebar.js` (`viewer.scalebar(...)`, `scalebarInstance.getImageWithScalebarAsCanvas()` for the download-view export) remain in `client/external/openseadragon-bin-2.4.0/`. Both are unmaintained third-party single-file plugins with no npm equivalent (confirmed via `npm view` — 404), vendored in-repo rather than pulled from a live fork; both currently work against OpenSeadragon 6.x with zero patches. `openseadragon-svg-overlay.js`, `openseadragonrgb.js`, and `openseadragon-filtering.js` were deleted — confirmed zero references anywhere in the app, and the RGB one was actually crashing page load under 6.x (it patched a `Drawer` internal that no longer exists).
+- If a future OpenSeadragon upgrade breaks tile rendering, the debugging order is: (1) confirm `drawer: 'canvas'` is still in effect, (2) confirm `tile-loaded` still exposes `e.tileRequest.response` the same way, (3) check the two vendored plugins against whatever internals changed.
+
 ## Common Tasks And Where To Work
 
 For notebook support:
@@ -116,6 +128,7 @@ For tile or segmentation bugs:
 - Start with browser console URLs and `server/routes/data_routes.py`.
 - Then inspect `server/models/data_model.py`, especially OME/zarr level selection, channel names, label image handling, and generated tile paths.
 - On the frontend, inspect `client/src/js/services/dataLayer.js` and `client/src/js/views/imageViewer.js`.
+- If the bug is specifically in tile decoding/colorizing (wrong colors, blank/black tiles, WebGL errors), see "OpenSeadragon Integration" above — start with `imageViewer.js`'s `handleTileLoaded`/`tileDrawingCustom` handlers and `client/src/js/services/glRenderer.js`.
 - Be careful with cache behavior: a symptom that only resolves after hard refresh can be frontend cache ordering, stale bundle, or request timing.
 
 For gating/nearest-cell/query behavior:
@@ -131,7 +144,9 @@ For frontend dependency or UI work:
 - Work in `minerva_analysis/client`.
 - Run `npm install` after dependency changes.
 - Run `npm run start` to regenerate `client/dist/vendor_bundle.js`.
-- Browser tests are legacy and may fail old behavioral assertions; do not assume `npm test` is fully green without checking current notes.
+- Browser tests are legacy and may fail old behavioral assertions; do not assume `npm test` is fully green without checking current notes. As of this writing the known-stable baseline is 2 passing / 3 failing (`Ensure visual rendering must load a mask`, `Ensure download ranges must download channel ranges`, `Ensure download encodings must download cell encodings`) — verified as pre-existing/unrelated to recent dependency work by running the same suite against both the old and new dependency versions and getting identical results. Treat only *new* failures beyond these three as real regressions.
+- `karma-jquery` (the test harness's jQuery-serving plugin) only bundles jQuery up to 3.4.0 and has no 4.x build, so `karma.conf.js`'s `frameworks: [..., 'jquery-3.4.0']` stays pinned to 3.4.0 even though the real app runs jQuery 4.x. This is a test-infra-only gap, not a product bug — don't try to "fix" it by downgrading the app's jQuery.
+- Files loaded as plain `<script>` tags in `base.html` (e.g. `imageViewer.js`, `viewerManager.js` is the exception — it's `import`ed into `vendor.js`) are NOT processed by webpack/Babel and cannot use `import`/`export` syntax. Anything they need from an npm package must be exposed as a `window.X` global from `vendor.js` first (see how `GLRenderer`, `ViewerManager`, `OpenSeadragon`, `$`, `d3`, etc. are attached there).
 
 For Python dependency modernization:
 
@@ -156,7 +171,7 @@ The baseline datasource is configurable via `MINERVA_BASELINE_DATASOURCE` (defau
 MINERVA_BASELINE_DATASOURCE=orion_mac python -m tests.baseline_orion2
 ```
 
-Known caveat: with `orion_mac`, 3 of 4 tests pass but `test_image_and_segmentation_tiles_render_pngs` still fails — it hardcodes the tile URL as `/generated/data/orion2/image_12/0/2_2.png` (`tests/baseline_orion2.py`) instead of using the `DATASOURCE` variable the rest of the test respects, so it always exercises `orion2` regardless of the env var. Treat that one failure as a known test bug, not a real regression, until it's fixed to use `DATASOURCE`.
+All 4 tests pass with `orion_mac` (verified). An earlier version of `tests/baseline_orion2.py` hardcoded the tile-check URL to the `orion2` datasource regardless of `MINERVA_BASELINE_DATASOURCE`; that's been fixed — the test now builds the URL from the `DATASOURCE` variable like the rest of the suite. If you see all 4 pass, that's the expected/healthy state, not a fluke.
 
 Python import/compile sanity:
 
@@ -236,7 +251,7 @@ MinervaViewer(datasource="orion2", data_dir="path/to/minerva_data", proxy=True)
 - Do not break absolute-path datasets in `config.json`; many remote datasets will live outside the package directory.
 - Keep package data complete. A pip-installed wheel must serve templates, built JS, shaders, CSS, images, and OpenSeadragon external files.
 - Avoid committing generated local data/build artifacts.
-- Treat `server/models/data_model.py` and `client/src/js/views/imageViewer.js` as high-risk: small changes can affect tile rendering, segmentation visibility, zoom behavior, and analysis queries.
+- Treat `server/models/data_model.py`, `client/src/js/views/imageViewer.js`, and `client/src/js/services/glRenderer.js` as high-risk: small changes can affect tile rendering, segmentation visibility, zoom behavior, and analysis queries. Any OpenSeadragon version bump needs the full re-verification described in "OpenSeadragon Integration" above, not just a `package.json` bump.
 - If changing URL construction, test both root mode `/` and proxied notebook mode `/proxy/<port>/`.
 - If changing segmentation, test both zoomed-out and zoomed-in display, first normal page load, and browser hard-refresh behavior.
 
@@ -268,8 +283,11 @@ Python:
 Frontend:
 
 - Webpack 5 is used.
-- Bootstrap is at 4.6.2. Do not jump to Bootstrap 5 as an incidental change.
-- jQuery is 3.7.x, D3 is 7.x, FontAwesome is 7.x.
+- Bootstrap is 5.3.8 (upgraded from 4.6.2), paired with `@popperjs/core` ^2.x (not the old `popper.js` v1). Bootstrap 5 removed `.form-group`, renamed `.ml-*`/`.mr-*` → `.ms-*`/`.me-*`, and `data-toggle` → `data-bs-toggle`; if you find code still using the old names it's a leftover, not intentional.
+- jQuery is 4.0.0 (upgraded from 3.7.x). Bootstrap 4 has a hard runtime guard that throws if it detects jQuery ≥4, which is why the Bootstrap and jQuery upgrades had to land in one commit together — they are not independently revertible.
+- Babel toolchain is 8.x (`@babel/core`, `@babel/preset-env`, `@babel/plugin-transform-runtime`, `@babel/plugin-transform-class-properties`, `@babel/preset-typescript`, `@babel/runtime` — keep these in lockstep, they're released together). Babel 8 defaults to browserslist-resolved compile targets and ESM output instead of ES5/CJS; `client/.browserslistrc` pins an explicit modern target (Chrome/Firefox/Edge ≥100, Safari ≥15) instead of riding Babel's shifting default. Babel 8 packages declare `engines: node ^22.18.0 || >=24.11.0` — an older local Node (e.g. 22.14.x) produces `EBADENGINE` warnings on `npm install` but has not caused build/test/runtime failures; don't treat that warning alone as a blocker.
+- OpenSeadragon is a real npm dependency at 6.1.0 (see "OpenSeadragon Integration" above) — it used to come from a personal-fork chain (`viawebgl`), which has been fully removed.
+- D3 is 7.x, FontAwesome is 7.x.
 - Browser-side `node-fetch` was removed in favor of native `fetch`.
 - The source is not React. Do not describe or treat it as a React app.
 
@@ -282,6 +300,7 @@ Frontend:
   - Files can get silently flipped from LF to CRLF line endings (or back) with zero content change, making `git status`/`git diff` show huge diffs on files nobody intentionally edited. Before editing or reviewing a file that shows as heavily modified, check with `git diff --ignore-space-at-eol -- <file>`; if that is empty, it is pure line-ending noise. When you do need to edit a CRLF-flipped file, the `Edit` tool's exact-string match can fail against `\r\n` content — fall back to a small Python script that edits the raw bytes and writes them back with `\n`.join(...) to avoid re-flipping the whole file back to LF as a side effect.
   - Executable bits on synced files (notably `minerva_analysis/client/node_modules/**/bin/*` after `npm install`) can get stripped, causing `npm run start` to fail with `Permission denied` on `webpack`. `chmod +x` the specific binary; `node_modules` is gitignored so this never touches tracked files.
 - `conda run -n minerva ...` can fail with `permission denied` from the `__conda_exe` shell function if the invoking shell's `$CONDA_EXE` env var is stale/unset (seen in non-interactive tool shells). If that happens, call the env's Python directly instead, e.g. `~/miniconda3/envs/minerva/bin/python -m compileall ...`, rather than assuming the environment itself is broken.
+- `requirements.yml`'s internal `name:` field says `minerva_analysis`, but the conda env actually used for local work (per this doc and in practice) is named `minerva`. Running plain `conda env create -f requirements.yml` will create/target an env called `minerva_analysis`, not `minerva`. To recreate the env under the name actually used, pass `-n minerva` explicitly: `conda env create -n minerva -f requirements.yml` (this also runs `pip install -e .[jupyter,dev]`, since that's baked into the yml's `pip:` section, so no separate install step is needed).
 - Missing segmentation tiles may show as browser console messages like `/generated/data/<dataset>/<label-channel>/<level>/<x>_<y>.png`. Confirm whether the tile is truly absent, computed lazily, or blocked by stale frontend cache.
 - A segmentation overlay that appears only after hard refresh suggests frontend cache/timing/base-url behavior, not necessarily bad source data.
 - `minerva_analysis/data/` is local runtime data. It may contain large datasets and should not be swept into commits.
@@ -292,7 +311,7 @@ Frontend:
 - Main active remote for current work may be `nirmallab` at `https://github.com/nirmallab/minerva_analysis.git`.
 - Upstream/original remote may also exist as `origin` at `https://github.com/labsyspharm/minerva_analysis.git`.
 - Check branch and remote before pushing.
-- Check `pyproject.toml` (`version = ...`) and `minerva_analysis/client/package.json` (`"version"`) for the current package version before referencing it. As of this writing they have drifted (`pyproject.toml` at `1.0.3`, `package.json` still at `1.0.2`) — verify both are actually in sync before a release; don't assume they match.
+- Check `pyproject.toml` (`version = ...`) and `minerva_analysis/client/package.json` (`"version"`) for the current package version before referencing it. They have drifted before (e.g. `pyproject.toml` at `1.0.8` while `package.json` stayed at `1.0.2`) — always re-check both rather than assuming they match or trusting a previously-noted pair of numbers.
 - For PyPI readiness, prefer this order:
   1. Run `python -m tests.baseline_orion2`.
   2. Run `npm run start` if frontend changed.
