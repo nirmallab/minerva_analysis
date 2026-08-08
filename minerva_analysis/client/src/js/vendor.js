@@ -15,13 +15,11 @@ import '@fortawesome/fontawesome-free/js/all'
 import Sortable from 'sortablejs';
 import Mark from 'mark.js'
 import $ from 'jquery'
-import convert from 'color-convert'
 import 'viawebgl'
 import * as viaWebGL from 'viawebgl';
 import {ViewerManager} from './views/viewerManager';
 import Dropzone from 'dropzone';
 
-window.convert = convert;
 window.$ = $;
 window.d3 = d3;
 window.d3.sliderBottom = sliderBottom;
