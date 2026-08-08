@@ -11,7 +11,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@babel/plugin-transform-class-properties": "^7.29.7",
+    "@babel/plugin-transform-class-properties": "^8.0.1",
     "@fortawesome/fontawesome-free": "^7.3.1",
     "@popperjs/core": "^2.11.8",
     "assert": "^2.1.0",
@@ -43,11 +43,11 @@
     "viawebgl": "github:thejohnhoffer/viaWebGL#webgl2"
   },
   "devDependencies": {
-    "@babel/core": "^7.29.7",
-    "@babel/plugin-transform-runtime": "^7.29.7",
-    "@babel/preset-env": "^7.29.7",
-    "@babel/preset-typescript": "^7.29.7",
-    "@babel/runtime": "^7.29.7",
+    "@babel/core": "^8.0.1",
+    "@babel/plugin-transform-runtime": "^8.0.1",
+    "@babel/preset-env": "^8.0.2",
+    "@babel/preset-typescript": "^8.0.1",
+    "@babel/runtime": "^8.0.0",
     "@httptoolkit/proxy-agent": "^5.0.1-socks-lookup-fix.0",
     "@types/chai": "^5.2.3",
     "@types/jquery": "^4.0.1",
