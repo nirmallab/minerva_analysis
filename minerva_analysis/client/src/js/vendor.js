@@ -14,9 +14,9 @@ import '@fortawesome/fontawesome-free/js/all'
 import Sortable from 'sortablejs';
 import Mark from 'mark.js'
 import $ from 'jquery'
-import 'viawebgl'
-import * as viaWebGL from 'viawebgl';
+import OpenSeadragon from 'openseadragon';
 import {ViewerManager} from './views/viewerManager';
+import {GLRenderer} from './services/glRenderer';
 import Dropzone from 'dropzone';
 
 window.$ = $;
@@ -27,7 +27,7 @@ window.UPNG = UPNG;
 window.Buffer = Buffer;
 window.Sortable = Sortable;
 window.Mark = Mark;
-window.OpenSeadragon = viaWebGL.OpenSeadragon;
+window.OpenSeadragon = OpenSeadragon;
 window.Dropzone = Dropzone;
-window.viaWebGL = viaWebGL;
 window.ViewerManager = ViewerManager;
+window.GLRenderer = GLRenderer;

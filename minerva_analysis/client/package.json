@@ -30,6 +30,7 @@
     "karma-sourcemap-loader": "^0.4.0",
     "lodash": "^4.18.1",
     "mark.js": "^8.11.1",
+    "openseadragon": "^6.1.0",
     "pngjs": "^7.0.0",
     "process": "^0.11.10",
     "querystring-es3": "^0.2.1",
@@ -39,8 +40,7 @@
     "style-loader": "^4.0.0",
     "upng-js": "^2.1.0",
     "url": "^0.11.4",
-    "util": "^0.12.5",
-    "viawebgl": "github:thejohnhoffer/viaWebGL#webgl2"
+    "util": "^0.12.5"
   },
   "devDependencies": {
     "@babel/core": "^8.0.1",

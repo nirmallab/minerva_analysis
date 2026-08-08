@@ -106,10 +106,15 @@ class ImageViewer {
             preload: false,
             homeFillsViewer: true,
             visibilityRatio: 0,
+            // Force the canvas drawer: our per-tile WebGL colorize pass needs
+            // the 'tile-drawing' event's 2D `rendered` context, which is only
+            // guaranteed under the canvas drawer (OSD 6's WebGL drawer has no
+            // documented custom-shader hook as of this writing).
+            drawer: "canvas",
         };
 
-        // Instantiate viewer with the ViaWebGL Version of OSD
-        this.viewer = viaWebGL.OpenSeadragon(viewer_config);
+        // Instantiate the real OpenSeadragon viewer
+        this.viewer = OpenSeadragon(viewer_config);
         this.addScaleBar();
         this.selectionPolygonToDraw = [];
 
@@ -129,29 +134,29 @@ class ImageViewer {
         // Flexible use of textures
         const constantTextures = ["ids", "centers", "gatings", "pickings"];
         const otherOffset = 32 - constantTextures.length;
-        const seaGL = new viaWebGL.openSeadragonGL(this.viewer);
+        const via = new GLRenderer();
         const nMarkers = 4;
         const markerOffset = otherOffset - nMarkers;
         const nTiles = markerOffset;
         const tileTextureKeys = [...Array(nTiles).keys()];
         const markerTextureKeys = [...Array(nMarkers).keys()];
-        seaGL.viaGL._otherOffset = otherOffset;
-        seaGL.viaGL._markerOffset = markerOffset;
-        seaGL.viaGL._tileTextures = tileTextureKeys.map(() => "");
-        seaGL.viaGL._markerTextures = markerTextureKeys.map(() => "");
-        seaGL.viaGL._constantTextures = constantTextures;
-        seaGL.viaGL._activeMarkerTexture = 0;
-        seaGL.viaGL._nextMarkerTexture = 0;
-        seaGL.viaGL._activeTileTexture = 0;
-        seaGL.viaGL._nextTileTexture = 0;
-        this.viaGL = seaGL.viaGL;
+        via._otherOffset = otherOffset;
+        via._markerOffset = markerOffset;
+        via._tileTextures = tileTextureKeys.map(() => "");
+        via._markerTextures = markerTextureKeys.map(() => "");
+        via._constantTextures = constantTextures;
+        via._activeMarkerTexture = 0;
+        via._nextMarkerTexture = 0;
+        via._activeTileTexture = 0;
+        via._nextTileTexture = 0;
+        this.viaGL = via;
 
         const getTileTexture = this.getTileTexture.bind(this);
         const indexOfTexture = this.indexOfTexture.bind(this);
         const selectTexture = this.selectTexture.bind(this);
         const resolveGLReady = this.resolveGLReady;
 
-        seaGL.viaGL.loadArray = function (e, w, h) {
+        via.loadArray = function (e, w, h) {
             // Allow for custom drawing in webGL
             var gl = this.gl;
             const { source } = e.tiledImage;
@@ -188,35 +193,34 @@ class ImageViewer {
             return gl.canvas;
         };
 
-        seaGL.vShader = minervaUrl("client/src/shaders/vert.glsl");
-        seaGL.fShader = minervaUrl("client/src/shaders/frag.glsl");
+        via.vShader = minervaUrl("client/src/shaders/vert.glsl");
+        via.fShader = minervaUrl("client/src/shaders/frag.glsl");
 
-        // Overwrite tile-drawing method
-        seaGL.io["tile-drawing"] = function (e) {
+        // Default tile-drawing behavior (invoked as the "callback" from the
+        // custom handler below, mirroring viaWebGL's io/default dispatch shape)
+        function tileDrawingDefault(e) {
             var w = e.rendered.canvas.width;
             var h = e.rendered.canvas.height;
-            var gl_w = this.viaGL.width;
-            var gl_h = this.viaGL.height;
+            var gl_w = via.width;
+            var gl_h = via.height;
 
             // Render a webGL canvas to an input canvas
-            var output = this.viaGL.loadArray(e, w, h);
+            var output = via.loadArray(e, w, h);
             e.rendered.drawImage(output, 0, 0, gl_w, gl_h, 0, 0, w, h);
-        };
+        }
 
         const { floatRange } = this.numericData;
         const findCurrentChannel = this.findCurrentChannel.bind(this);
         const selectCenterProps = this.selectCenterProps.bind(this);
         const labelOutlinesEnabled = () => !!this.viewerManagerVMain?.sel_outlines;
-        // Draw handler for viaWebGL
-        seaGL.addHandler("tile-drawing", async function (callback, e) {
+        // Custom tile-drawing handler
+        const tileDrawingCustom = async (callback, e) => {
             // Read parameters from each tile
             const { source } = e.tiledImage;
             const { tileFormat } = source;
-            const group = e.tile.url.split("/");
+            const group = e.tile.getUrl().split("/");
             const sub_url = group[group.length - 3];
             const centerProps = selectCenterProps(e.tile, source);
-
-            const via = this.viaGL;
 
             if (tileFormat == 32 && e.tile._renderedContext) {
                 const w = e.rendered.canvas.width;
@@ -245,7 +249,7 @@ class ImageViewer {
                 };
             } else {
                 if (!e.tile._array) {
-                    console.warn("Missing Array for tile:", e.tile.url, "- skipping rendering");
+                    console.warn("Missing Array for tile:", e.tile.getUrl(), "- skipping rendering");
                     // Skip rendering this tile by returning early
                     return;
                 }
@@ -271,9 +275,9 @@ class ImageViewer {
 
             // Start webGL rendering
             callback(e);
-        });
+        };
 
-        seaGL.addHandler("gl-drawing", function () {
+        via["gl-drawing"] = function () {
             const args = this.gl_arguments;
 
             // Send color and range to shader
@@ -292,9 +296,9 @@ class ImageViewer {
             this.gl.uniform2fv(this.u_y_bounds, args.y_bounds_2fv);
             this.gl.uniform1i(this.u_tile_fmt, args.fmt_1i);
             this.gl.uniform1i(this.u_id_end, args.id_end_1i);
-        });
+        };
 
-        seaGL.addHandler("gl-loaded", function (program) {
+        via["gl-loaded"] = function (program) {
             // Uniform variables for coloring
             this.u_ids_shape = this.gl.getUniformLocation(program, "u_ids_shape");
             this.u_tile_shape = this.gl.getUniformLocation(program, "u_tile_shape");
@@ -330,7 +334,7 @@ class ImageViewer {
                 this.gl.uniform1i(u_mag_i, i + this._markerOffset);
             }
             setTimeout(() => resolveGLReady(), 0);
-        });
+        };
 
         const matchTile = (e, { x, y, level }) => {
             const grid = e.tiledImage.tilesMatrix[level];
@@ -384,8 +388,35 @@ class ImageViewer {
         };
         this.renderLabelTile = renderLabelTile;
 
+        // Default tile-loaded behavior: decode the raw tile bytes ourselves.
+        // OpenSeadragon 6.x exposes the underlying XHR on `e.tileRequest` (a
+        // stable, non-deprecated property) with `response` as an ArrayBuffer
+        // of the raw compressed tile (OSD uses responseType: "arraybuffer" for
+        // AJAX-loaded tiles), so no forked ImageJob is needed to reach it.
+        function tileLoadedDefault(e) {
+            const decoder = new Promise((resolve, reject) => {
+                const responseArray = e.tileRequest?.response;
+                if (!responseArray) {
+                    reject();
+                    return;
+                }
+                const img = window.UPNG.decode(responseArray);
+                if (img.ctype == 0 && img.depth == 16) {
+                    img.data = img.data.slice(0, 2 * img.width * img.height);
+                    e.tile._array = img.data;
+                    e.tile._format = "u16";
+                } else if (img.ctype == 6 && img.depth == 8) {
+                    img.data = img.data.slice(0, 4 * img.width * img.height);
+                    e.tile._array = img.data;
+                    e.tile._format = "u32";
+                }
+                resolve();
+            });
+            decoder.then(e.getCompletionCallback());
+        }
+
         const forceRepaint = this.forceRepaint.bind(this);
-        seaGL.addHandler("tile-loaded", (callback, e) => {
+        const tileLoadedCustom = (callback, e) => {
             const { source } = e.tiledImage;
             const { tileFormat } = source;
             try {
@@ -426,14 +457,14 @@ class ImageViewer {
                     }
                     return;
                 }
-                else if (e?.image) {
+                else if (e?.tileRequest || e?.image) {
                     return callback(e);
                 }
             } catch (err) {
-                console.log("Load Error, Refreshing", err, e.tile.url);
+                console.log("Load Error, Refreshing", err, e.tile.getUrl());
                 forceRepaint();
             }
-        });
+        };
 
         this.viewer.addHandler("tile-drawn", (e) => {
             let count = _.size(e.tiledImage._tileCache._tilesLoaded);
@@ -453,7 +484,28 @@ class ImageViewer {
             delete e.tile._array;
         });
 
-        seaGL.init();
+        // Equivalent of viaWebGL's openSeadragonGL.init(): on 'open', size the
+        // GL canvas, compile shaders, then wire the real tile-loaded/tile-drawing
+        // handlers and force existing items to redraw. viewerManager.js manually
+        // re-raises 'open' after adding the label tiled image, so this can run
+        // more than once by design (matches the original behavior).
+        const initGL = () => {
+            via.width = via.width || this.config.tileWidth;
+            via.height = via.height || this.config.tileHeight;
+            via.updateShape(via.width, via.height);
+            via.init().then(() => {
+                this.viewer.addHandler("tile-loaded", (e) => tileLoadedCustom(tileLoadedDefault, e));
+                this.viewer.addHandler("tile-drawing", (e) => tileDrawingCustom(tileDrawingDefault, e));
+
+                const world = this.viewer.world;
+                for (let i = 0; i < world.getItemCount(); i++) {
+                    world.getItemAt(i)._needsDraw = true;
+                }
+                world.update();
+            });
+        };
+        this.viewer.addHandler("open", initGL);
+
 
         // Add automatic tile cache monitoring and clearing
         setInterval(() => {
