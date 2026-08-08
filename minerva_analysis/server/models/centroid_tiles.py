@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from minerva_analysis import data_path
 
@@ -127,11 +127,15 @@ def build_cache(config, datasource_name, expected=None):
 
     csv_path = Path(expected["csv_path"])
     usecols = [expected["id_column"], expected["x_column"], expected["y_column"]]
-    table = pd.read_csv(csv_path, usecols=usecols)
+    table = pl.read_csv(csv_path, columns=usecols)
 
-    ids = pd.to_numeric(table[expected["id_column"]], errors="coerce").to_numpy()
-    xs = pd.to_numeric(table[expected["x_column"]], errors="coerce").to_numpy()
-    ys = pd.to_numeric(table[expected["y_column"]], errors="coerce").to_numpy()
+    # Explicit null->NaN fill (rather than relying on Polars' default float
+    # export behavior) so invalid/unparseable values behave like pandas'
+    # pd.to_numeric(errors="coerce") did: NaN, not null, so the np.isfinite
+    # checks below keep working unchanged.
+    ids = table[expected["id_column"]].cast(pl.Float64, strict=False).fill_null(float("nan")).to_numpy()
+    xs = table[expected["x_column"]].cast(pl.Float64, strict=False).fill_null(float("nan")).to_numpy()
+    ys = table[expected["y_column"]].cast(pl.Float64, strict=False).fill_null(float("nan")).to_numpy()
     valid = np.isfinite(ids) & np.isfinite(xs) & np.isfinite(ys)
     rows = np.nonzero(valid)[0].astype(np.uint32, copy=False)
     ids = ids[valid].astype(np.uint32, copy=False)
@@ -220,10 +224,12 @@ def _load_filter_table(config, datasource_name, gates):
     if cached is not None:
         return cached
 
-    table = pd.read_csv(expected["csv_path"], usecols=list(gate_columns))
+    table = pl.read_csv(expected["csv_path"], columns=list(gate_columns))
     numeric = {}
     for column in gate_columns:
-        numeric[column] = pd.to_numeric(table[column], errors="coerce").to_numpy(dtype=np.float32, copy=False)
+        numeric[column] = (
+            table[column].cast(pl.Float32, strict=False).fill_null(float("nan")).to_numpy()
+        )
     _filter_tables.clear()
     _filter_tables[key] = numeric
     return numeric

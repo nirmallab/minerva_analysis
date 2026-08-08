@@ -1,15 +1,17 @@
 from minerva_analysis import app
-from flask import make_response, render_template, request, Response, jsonify, abort, send_file
+from flask import make_response, render_template, request, Response, jsonify, abort, send_file, stream_with_context
 import io
 from PIL import Image
 from minerva_analysis import data_path, get_config
 from minerva_analysis.server.models import data_model
 from pathlib import Path
 from time import time
-import pandas as pd
+import polars as pl
 import gzip
 import json
 import orjson
+import threading
+from collections import OrderedDict
 from os import walk
 from flask_sqlalchemy import SQLAlchemy
 
@@ -202,14 +204,14 @@ def download_gating_csv():
     if fullCsv:
         csv = data_model.download_gating_csv(datasource, filter, channels, selection_ids, encoding)
         return Response(
-            csv.to_csv(index=False),
+            stream_with_context(_stream_csv(csv)),
             mimetype="text/csv",
             headers={"Content-disposition":
                          "attachment; filename=" + filename + ".csv"})
     else:
         csv = data_model.download_gates(datasource, filter, channels, lassos)
         return Response(
-            csv.to_csv(index=False),
+            csv.write_csv(),
             mimetype="text/csv",
             headers={"Content-disposition":
                          "attachment; filename=" + filename + ".csv"})
@@ -246,7 +248,7 @@ def download_channels_csv():
     list_channels = json.loads(request.form['list_channels'])
     csv = data_model.download_channels(datasource, map_channels, active_channels, list_colors, list_ranges, list_channels)
     return Response(
-        csv.to_csv(index=False),
+        csv.write_csv(),
         mimetype="text/csv",
         headers={"Content-disposition":
                      "attachment; filename=" + filename + ".csv"})
@@ -273,8 +275,8 @@ def get_gating_csv_values():
     file_path = data_path / datasource / 'uploaded_gates.csv'
     if file_path.is_file() == False:
         abort(422)
-    csv = pd.read_csv(file_path)
-    obj = csv.to_dict(orient='records')
+    csv = pl.read_csv(file_path)
+    obj = csv.to_dicts()
     return serialize_and_submit_json(obj)
 
 @app.route('/get_uploaded_channel_csv_values', methods=['GET'])
@@ -283,8 +285,8 @@ def get_channel_csv_values():
     file_path = data_path / datasource / 'uploaded_channels.csv'
     if file_path.is_file() == False:
         abort(422)
-    csv = pd.read_csv(file_path)
-    obj = csv.to_dict(orient='records')
+    csv = pl.read_csv(file_path)
+    obj = csv.to_dicts()
     return serialize_and_submit_json(obj)
 
 @app.route('/get_saved_channel_list', methods=['GET'])
@@ -293,17 +295,52 @@ def get_saved_channel_list():
     resp = data_model.get_saved_channel_list(datasource)
     return serialize_and_submit_json(resp)
 
+_tile_png_cache = OrderedDict()
+_tile_png_cache_lock = threading.Lock()
+_TILE_PNG_CACHE_MAX = 1500
+
+
+def _get_tile_png_bytes(datasource, channel, level, tile):
+    # Keyed on data_model.load_generation so a datasource reload (which may
+    # regenerate segmentation, per ensure_outline_segmentation) naturally
+    # invalidates previously cached tiles without cross-module cache access.
+    key = (data_model.load_generation, datasource, channel, level, tile)
+    with _tile_png_cache_lock:
+        cached = _tile_png_cache.get(key)
+        if cached is not None:
+            _tile_png_cache.move_to_end(key)
+            return cached
+
+    png = data_model.generate_zarr_png(datasource, channel, level, tile)
+    file_object = io.BytesIO()
+    Image.fromarray(png).save(file_object, 'PNG', compress_level=0)
+    encoded = file_object.getvalue()
+
+    with _tile_png_cache_lock:
+        _tile_png_cache[key] = encoded
+        _tile_png_cache.move_to_end(key)
+        while len(_tile_png_cache) > _TILE_PNG_CACHE_MAX:
+            _tile_png_cache.popitem(last=False)
+    return encoded
+
+
 # E.G /generated/data/melanoma/channel_00_files/13/16_18.png
 @app.route('/generated/data/<string:datasource>/<string:channel>/<string:level>/<string:tile>')
 def generate_png(datasource, channel, level, tile):
-    now = time()
-    png = data_model.generate_zarr_png(datasource, channel, level, tile)
-    file_object = io.BytesIO()
-    # write PNG in file-object
-    Image.fromarray(png).save(file_object, 'PNG', compress_level=0)
-    # move to beginning of file so `send_file()` it will read from start
-    file_object.seek(0)
-    return send_file(file_object, mimetype='image/PNG')
+    encoded = _get_tile_png_bytes(datasource, channel, level, tile)
+    return send_file(io.BytesIO(encoded), mimetype='image/PNG')
+
+def _stream_csv(df, chunksize=100_000):
+    """Yield a large DataFrame as CSV in row chunks instead of materializing
+    the full serialized string (and holding it alongside the DataFrame) in
+    memory at once, as df.write_csv() would for a multi-million-row gating
+    export. Polars has no built-in chunked-string-generator, so this slices
+    and writes each chunk by hand."""
+    header = True
+    for start in range(0, df.height, chunksize):
+        yield df.slice(start, chunksize).write_csv(include_header=header)
+        header = False
+
 
 def serialize_and_submit_json(data):
     response = app.response_class(

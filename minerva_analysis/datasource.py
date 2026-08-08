@@ -3,7 +3,7 @@ import re
 import shutil
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 
 def _default_marker_columns(columns, x, y, id_column, celltype_column):
@@ -79,7 +79,7 @@ def register_datasource(
     segmentation_path = _copy_if_requested(segmentation, dataset_dir, copy)
     features_path = _copy_if_requested(features, dataset_dir, copy)
 
-    feature_table = pd.read_csv(features_path, nrows=1)
+    feature_table = pl.read_csv(features_path, n_rows=1)
     missing = [column for column in [x, y, id_column] if column not in feature_table.columns]
     if missing:
         raise ValueError("Missing required feature columns: " + ", ".join(missing))

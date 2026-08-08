@@ -1,13 +1,11 @@
 #%%
-import pandas as pd
+import polars as pl
 
-data = pd.read_csv('./unmicst-WD-76845-097-ij_subtracted_50.csv', encoding="utf-8-sig")
+data = pl.read_csv('./unmicst-WD-76845-097-ij_subtracted_50.csv')
 data.head()
 #%%
-data['HE_r'] = 0
-data['HE_g'] = 0
-data['HE_b'] = 0
+data = data.with_columns(pl.lit(0).alias('HE_r'), pl.lit(0).alias('HE_g'), pl.lit(0).alias('HE_b'))
 data.columns
 #%%
-data.to_csv('./unmicst-WD-76845-097-ij_subtracted_50-jj.csv', index=False)
+data.write_csv('./unmicst-WD-76845-097-ij_subtracted_50-jj.csv')
 #%%

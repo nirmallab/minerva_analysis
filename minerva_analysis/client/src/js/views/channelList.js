@@ -120,6 +120,10 @@ class ChannelList {
         let list = document.createElement("ul");
         list.classList.add("list-group")
         channel_list.appendChild(list)
+        // Read once, before the loop below, instead of once per channel --
+        // channel_list's width doesn't change per row, so re-reading it
+        // inside the loop only forces redundant layout reflows.
+        const channelListWidth = channel_list.getBoundingClientRect().width;
         // Will show the picker when you click on a color rect
         let showPicker = e => {
             this.colorTransferHandle = d3.select(e.target);
@@ -229,9 +233,7 @@ class ChannelList {
             let sliderMin = this.databaseDescription[fullName]['image_min']
             let sliderMax = this.databaseDescription[fullName]['image_max']
             this.image_channels[column] = [sliderMin, sliderMax];
-            const channelListEl = document.getElementById("channel_list");
-            const swidth = channelListEl.getBoundingClientRect().width;
-            let sliderRange = this.addSlider(column, swidth, [sliderMin, sliderMax]);
+            let sliderRange = this.addSlider(column, channelListWidth, [sliderMin, sliderMax]);
             d3.select('div#channel-slider_' + channelID).style('display', "none");
 
         });

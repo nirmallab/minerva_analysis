@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from minerva_analysis.server.models import centroid_tiles
 
@@ -30,7 +30,7 @@ def _config(csv_path, name="sample", max_level=3):
 def _write_csv(path, count=32):
     xs = np.arange(count, dtype=np.float32) * 20 + 5
     ys = np.arange(count, dtype=np.float32) * 10 + 7
-    df = pd.DataFrame(
+    df = pl.DataFrame(
         {
             "CellID": np.arange(count, dtype=np.uint32) + 100,
             "x": xs,
@@ -39,7 +39,7 @@ def _write_csv(path, count=32):
             "MarkerB": np.linspace(10, 0, count),
         }
     )
-    df.to_csv(path, index=False)
+    df.write_csv(path)
     return df
 
 
@@ -81,7 +81,7 @@ def test_centroid_tile_query_returns_requested_tile_points(tmp_path, monkeypatch
     records = centroid_tiles.get_tiles(config, "sample", 0, [{"x": 0, "y": 0}])
 
     assert records.dtype == centroid_tiles.RESPONSE_DTYPE
-    expected = df[(df["x"] < 256) & (df["y"] < 256)]["CellID"].astype(np.uint32).to_numpy()
+    expected = df.filter((pl.col("x") < 256) & (pl.col("y") < 256))["CellID"].cast(pl.UInt32).to_numpy()
     np.testing.assert_array_equal(records["id"], expected)
 
 
@@ -100,14 +100,14 @@ def test_centroid_tile_query_applies_gates_vectorized(tmp_path, monkeypatch):
         {"MarkerA": [3.0, 7.0], "MarkerB": [2.0, 8.0]},
     )
 
-    expected = df[
-        (df["x"] < 512)
-        & (df["y"] < 256)
-        & (df["MarkerA"] > 3.0)
-        & (df["MarkerA"] < 7.0)
-        & (df["MarkerB"] > 2.0)
-        & (df["MarkerB"] < 8.0)
-    ]["CellID"].astype(np.uint32).to_numpy()
+    expected = df.filter(
+        (pl.col("x") < 512)
+        & (pl.col("y") < 256)
+        & (pl.col("MarkerA") > 3.0)
+        & (pl.col("MarkerA") < 7.0)
+        & (pl.col("MarkerB") > 2.0)
+        & (pl.col("MarkerB") < 8.0)
+    )["CellID"].cast(pl.UInt32).to_numpy()
     np.testing.assert_array_equal(records["id"], expected)
 
 

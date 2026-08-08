@@ -11,9 +11,9 @@ dependencies:
   - numpy
   - ome-types
   - orjson
-  - pandas
   - pillow
   - pip
+  - polars
   - pyinstaller
   - python=3.13
   - scikit-image

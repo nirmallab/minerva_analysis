@@ -26,10 +26,17 @@ class NumericData {
       const { idField, xCoordinate, yCoordinate } = this.features;
       const fields = [ idField, xCoordinate, yCoordinate ];
       const idsCenters = await this.getAllUInt32Entries(fields);
-      const isCenter = (_, i) => !!(i % fields.length);
-      const centers = idsCenters.filter(isCenter);
-      const isId = (_, i) => !(i % fields.length);
-      const ids = idsCenters.filter(isId);
+      // Deinterleave in one linear pass instead of two full-array .filter()
+      // passes (was O(2 * cellCount * fields.length)).
+      const count = idsCenters.length / fields.length;
+      const ids = new Uint32Array(count);
+      const centers = new Uint32Array(count * (fields.length - 1));
+      for (let i = 0, o = 0, c = 0; i < idsCenters.length; i += fields.length, o++) {
+          ids[o] = idsCenters[i];
+          for (let k = 1; k < fields.length; k++) {
+              centers[c++] = idsCenters[i + k];
+          }
+      }
       return { ids, centers };
   }
 

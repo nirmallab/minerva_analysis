@@ -1,7 +1,8 @@
 from sklearn.neighbors import BallTree
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
-import pandas as pd
+import polars as pl
+import polars.selectors as cs
 import json
 import os
 import io
@@ -42,6 +43,11 @@ load_lock = threading.RLock()
 # since these caches were only ever valid for the previously loaded content.
 _gmm_cache = {}
 _description_cache = {}
+_gate_filter_cache = {}
+# Incremented each time load_datasource actually (re)loads data, so other
+# modules can key a cache off "which load is this" without importing this
+# module's internal cache dicts directly.
+load_generation = 0
 
 
 def _zarr_level(group, level):
@@ -198,6 +204,7 @@ def load_datasource(datasource_name, reload=False):
     global zarray
     global channels
     global metadata
+    global load_generation
     with load_lock:
         if source == datasource_name and datasource is not None and seg is not None and channels is not None and reload is False:
             return
@@ -206,9 +213,17 @@ def load_datasource(datasource_name, reload=False):
             load_ball_tree(datasource_name, reload=reload)
         csvPath = Path(config[datasource_name]['featureData'][0]['src'])
         print("Loading csv data.. (this can take some time)")
-        loaded_datasource = pd.read_csv(csvPath)
-        loaded_datasource['id'] = loaded_datasource.index
-        loaded_datasource = loaded_datasource.replace(-np.inf, 0)
+        loaded_datasource = pl.read_csv(csvPath)
+        # Manufacture a stable positional 'id' column, mirroring pandas'
+        # implicit RangeIndex usage in the code this replaced -- must happen
+        # immediately after read_csv, before any other transform, since
+        # downstream code treats 'id' as a stable per-row identity.
+        loaded_datasource = loaded_datasource.with_row_index("id").with_columns(pl.col("id").cast(pl.Int64))
+        numeric_cols = [c for c, dt in loaded_datasource.schema.items() if dt in (pl.Float32, pl.Float64)]
+        loaded_datasource = loaded_datasource.with_columns([
+            pl.when(pl.col(c) == float("-inf")).then(0).otherwise(pl.col(c)).alias(c)
+            for c in numeric_cols
+        ])
         print("Loading segmentation.")
         if config[datasource_name]['segmentation'].endswith('.zarr'):
             loaded_seg = zarr.open(config[datasource_name]['segmentation'])
@@ -245,7 +260,18 @@ def load_datasource(datasource_name, reload=False):
         # reload) -- any cached GMM/description results are now stale.
         _gmm_cache.clear()
         _description_cache.clear()
+        _gate_filter_cache.clear()
+        # Bumped so downstream tile-byte caches (keyed on this) know to
+        # treat previously cached tiles as stale without needing a direct
+        # reference back into this module's caches.
+        load_generation += 1
         print("Data loading done.")
+
+    # Warm the description/GMM caches in the background so the first real
+    # request after this load doesn't pay for them synchronously.
+    threading.Thread(
+        target=_warm_datasource_caches, args=(datasource_name,), daemon=True
+    ).start()
 
 
 def load_config(datasource_name):
@@ -284,6 +310,14 @@ def load_config(datasource_name):
             configJson.truncate()
 
 
+def _ball_tree_source_signature(csv_path):
+    stat = csv_path.stat()
+    return {
+        "csv_size": stat.st_size,
+        "csv_mtime_ns": stat.st_mtime_ns,
+    }
+
+
 def load_ball_tree(datasource_name_name, reload=False):
     global ball_tree
     global datasource
@@ -291,53 +325,87 @@ def load_ball_tree(datasource_name_name, reload=False):
     if datasource_name_name != source:
         load_datasource(datasource_name_name)
 
-    # old with os.path
-    # pickled_kd_tree_path = str(
-    #     Path(
-    #         os.path.join(os.getcwd())) / data_path / datasource_name_name / "ball_tree.pickle")
-
-    #using pathlib now:
     pickled_kd_tree_path = str(
         PurePath(cwd_path, data_path, datasource_name_name, "ball_tree.pickle"))
 
-    #old os.path way:  if os.path.isfile(pickled_kd_tree_path) and reload is False:
-    if Path(pickled_kd_tree_path).is_file() and reload is False:
+    csvPath = Path(config[datasource_name_name]['featureData'][0]['src'])
+    signature = _ball_tree_source_signature(csvPath)
 
+    if Path(pickled_kd_tree_path).is_file() and reload is False:
         print("Pickled KD Tree Exists, Loading")
         try:
             with open(pickled_kd_tree_path, "rb") as tree_file:
-                ball_tree = pickle.load(tree_file)
-            print("Pickled KD Tree Loaded.")
-            return
+                cached = pickle.load(tree_file)
+            if isinstance(cached, dict) and cached.get('signature') == signature:
+                ball_tree = cached['tree']
+                print("Pickled KD Tree Loaded.")
+                return
+            print("Pickled KD Tree is stale (source CSV changed), rebuilding.")
         except Exception as exc:
             print(f"Could not load pickled KD Tree, rebuilding: {exc}")
 
     print("Creating KD Tree.")
     xCoordinate = config[datasource_name_name]['featureData'][0]['xCoordinate']
     yCoordinate = config[datasource_name_name]['featureData'][0]['yCoordinate']
-    csvPath = Path(config[datasource_name_name]['featureData'][0]['src'])
-    raw_data = pd.read_csv(csvPath)
-    points = pd.DataFrame({'x': raw_data[xCoordinate], 'y': raw_data[yCoordinate]})
+    # Reuse the feature table load_datasource already parsed instead of
+    # re-reading the (potentially multi-million-row) CSV from disk again.
+    points = datasource.select([xCoordinate, yCoordinate]).to_numpy()
     ball_tree = BallTree(points, metric='euclidean')
     with open(pickled_kd_tree_path, 'wb') as tree_file:
-        pickle.dump(ball_tree, tree_file)
+        pickle.dump({'signature': signature, 'tree': ball_tree}, tree_file)
     print('Creating KD Tree done.')
+
+
+def _ensure_loaded(datasource_name):
+    """Ensure the CSV/BallTree for datasource_name is the currently loaded one."""
+    if datasource_name != source:
+        load_ball_tree(datasource_name)
+
+
+_warmup_locks = {}
+_warmup_locks_guard = threading.Lock()
+
+
+def _warmup_lock_for(datasource_name):
+    with _warmup_locks_guard:
+        if datasource_name not in _warmup_locks:
+            _warmup_locks[datasource_name] = threading.Lock()
+        return _warmup_locks[datasource_name]
+
+
+def _warm_datasource_caches(datasource_name):
+    """Pre-populate description/GMM caches in the background so the first
+    real request after a datasource load doesn't pay for them synchronously.
+    Best-effort only: if a concurrent switch to a different datasource races
+    this, the _ensure_loaded() calls inside will just reload as needed.
+    """
+    lock = _warmup_lock_for(datasource_name)
+    if not lock.acquire(blocking=False):
+        return
+    try:
+        get_datasource_description(datasource_name)
+        for channel in config[datasource_name]['imageData']:
+            if channel['name'] != 'Area':
+                get_channel_gmm(channel['fullname'], datasource_name)
+    except Exception as exc:
+        print(f"Background cache warmup failed for {datasource_name}: {exc}")
+    finally:
+        lock.release()
 
 
 def query_for_closest_cell(x, y, datasource_name):
     global datasource
     global source
     global ball_tree
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
     distance, index = ball_tree.query([[x, y]], k=1)
     if distance == np.inf:
         return {}
     #         Nothing found
     else:
         try:
-            row = datasource.iloc[index[0]]
-            obj = row.to_dict(orient='records')[0]
+            row = datasource[index[0].tolist()]
+            obj = row.to_dicts()[0]
             if 'celltype' not in obj:
                 obj['celltype'] = ''
             return obj
@@ -349,8 +417,7 @@ def get_row(row, datasource_name):
     global database
     global source
     global ball_tree
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
     obj = database.loc[[row]].to_dict(orient='records')[0]
     obj['id'] = row
     return obj
@@ -359,8 +426,7 @@ def get_row(row, datasource_name):
 def get_channel_names(datasource_name, shortnames=True):
     global datasource
     global source
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
     if shortnames:
         channel_names = [channel['name'] for channel in config[datasource_name]['imageData'][1:]]
     else:
@@ -368,26 +434,58 @@ def get_channel_names(datasource_name, shortnames=True):
     return channel_names
 
 
+def _gate_filter_columns(datasource_name, columns):
+    """Numeric numpy views of the requested columns pulled from the
+    already-loaded datasource, cached (one entry at a time, like
+    centroid_tiles._load_filter_table) so repeated gate queries on the same
+    columns reuse the same arrays instead of re-deriving them per request.
+    """
+    key = (datasource_name, tuple(sorted(set(columns))))
+    cached = _gate_filter_cache.get(key)
+    if cached is not None:
+        return cached
+    cols = {
+        c: datasource[c].cast(pl.Float32, strict=False).fill_null(float('nan')).to_numpy()
+        for c in columns
+    }
+    _gate_filter_cache.clear()
+    _gate_filter_cache[key] = cols
+    return cols
+
+
+def _apply_gate_mask(columns, gates, mode='and'):
+    n = len(next(iter(columns.values()))) if columns else 0
+    keep = np.ones(n, dtype=bool) if mode == 'and' else np.zeros(n, dtype=bool)
+    for key, value in gates.items():
+        if key not in columns:
+            continue
+        low, high = float(value[0]), float(value[1])
+        match = (columns[key] > low) & (columns[key] < high)
+        if mode == 'and':
+            keep &= match
+        else:
+            keep |= match
+    return keep
+
+
+def _records_for_keys(keys, keep):
+    arrays = [datasource[k].to_numpy()[keep].tolist() for k in keys]
+    return [dict(zip(keys, row)) for row in zip(*arrays)]
+
+
 def get_channel_cells(datasource_name, channels):
     global datasource
-    global source
-    global ball_tree
 
-    range = [0, 65536]
+    _ensure_loaded(datasource_name)
 
-    # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
-
-    query_string = ''
-    for c in channels:
-        if query_string != '':
-            query_string += ' and '
-        query_string += str(range[0]) + ' < `' + c + '` < ' + str(range[1])
-    if query_string == None or query_string == "":
+    if not channels:
         return []
-    query = datasource.query(query_string)[['id']].to_dict(orient='records')
-    return query
+
+    gate_range = (0, 65536)
+    columns = _gate_filter_columns(datasource_name, channels)
+    keep = _apply_gate_mask(columns, {c: gate_range for c in channels}, mode='and')
+    ids = datasource['id'].to_numpy()[keep].tolist()
+    return [{'id': v} for v in ids]
 
 
 def get_phenotype_description(datasource):
@@ -396,7 +494,7 @@ def get_phenotype_description(datasource):
         csvPath = config[datasource]['featureData'][0]['celltypeData']
         if Path(csvPath).is_file():
         #old os.path usage: if os.path.isfile(csvPath):
-            data = pd.read_csv(csvPath)
+            data = pl.read_csv(csvPath)
             data = data.to_numpy().tolist()
             # data = data.to_json(orient='records', lines=True)
         return data;
@@ -423,8 +521,7 @@ def get_cells_phenotype(datasource_name):
     range = [0, 65536]
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
 
     try:
         phenotype_field = config[datasource_name]['featureData'][0]['celltype']
@@ -433,59 +530,36 @@ def get_cells_phenotype(datasource_name):
     except TypeError:
         phenotype_field = 'celltype'
 
-    query = datasource[['id', phenotype_field]].to_dict(orient='records')
+    query = datasource.select(['id', phenotype_field]).to_dicts()
     return query
 
 
 def get_gated_cells(datasource_name, gates, start_keys):
     global datasource
-    global source
-    global ball_tree
 
-    # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
 
-    query_string = ''
-    query_keys = start_keys
-    for key, value in gates.items():
-        if query_string != '':
-            query_string += ' and '
-        query_string += str(value[0]) + ' < `' + key + '` < ' + str(value[1])
-        query_keys.append(key)
-    if query_string is None or query_string == "":
+    if not gates:
         return []
-    # query_keys[0] is the ID]
-    query = datasource.query(query_string)[[query_keys[0]]].to_dict(orient='records')
-    return query
+    columns = _gate_filter_columns(datasource_name, list(gates.keys()))
+    keep = _apply_gate_mask(columns, gates, mode='and')
+    id_key = start_keys[0]
+    values = datasource[id_key].to_numpy()[keep].tolist()
+    return [{id_key: v} for v in values]
 
 
 def get_gated_cells_custom(datasource_name, gates, start_keys):
     global datasource
-    global source
-    global ball_tree
 
-    # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
 
-    # Query
-    query_string = ''
-    query_keys = start_keys
-    for key, value in gates.items():
-        if query_string != '':
-            query_string += ' or '
-        query_string += str(value[0]) + ' < `' + key + '` < ' + str(value[1])
-        query_keys.append(key)
-    if query_string is None or query_string == "":
+    if not gates:
         return []
-    query = datasource.query(query_string)[query_keys].to_dict(orient='records')
+    columns = _gate_filter_columns(datasource_name, list(gates.keys()))
+    keep = _apply_gate_mask(columns, gates, mode='or')
+    query_keys = start_keys + list(gates.keys())
+    return _records_for_keys(query_keys, keep)
 
-    # TODO - likely lighter / less costly
-    # query = database.query(query_string)[query_keys].to_dict('split')
-    # del query['index']
-
-    return query
 
 
 def get_all_cells(datasource_name, start_keys, data_type=float):
@@ -493,10 +567,9 @@ def get_all_cells(datasource_name, start_keys, data_type=float):
     global source
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
 
-    query = datasource[start_keys].values.flatten('C');
+    query = datasource.select(start_keys).to_numpy().flatten()
     if np.issubdtype(data_type, int):
         return query.astype(np.uint32)
     return query.astype(np.float32)
@@ -522,11 +595,12 @@ def download_gating_csv(datasource_name, gates, channels, selection_ids, encodin
     global ball_tree
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
 
-    csv = datasource.copy()
-    datasource_filter = datasource.copy()
+    # Polars' with_columns always returns a new frame, so (unlike pandas'
+    # in-place .loc mutation) there's no risk to the shared global from
+    # building the per-channel columns below without a defensive .copy().
+    csv = datasource
 
     columns = []
     if 'idField' in config[datasource_name]['featureData'][0]:
@@ -536,25 +610,40 @@ def download_gating_csv(datasource_name, gates, channels, selection_ids, encodin
     columns.append(idField)
 
     if selection_ids:
-        datasource_filter = datasource_filter[datasource_filter[idField].isin(selection_ids)]
+        datasource_filter = datasource.filter(pl.col(idField).is_in(selection_ids))
+    else:
+        datasource_filter = datasource
 
-    query_string = ''
+    expr = None
     for key, value in gates.items():
         columns.append(key)
-        if query_string != '':
-            query_string += ' and '
-        query_string += str(value[0]) + ' < `' + key + '` < ' + str(value[1])
-    ids = datasource_filter.query(query_string)[['id']].to_numpy().flatten()
+        cond = (pl.col(key) > value[0]) & (pl.col(key) < value[1])
+        expr = cond if expr is None else (expr & cond)
+    if expr is not None:
+        ids = datasource_filter.filter(expr)['id'].to_numpy()
+    else:
+        # No gates set: no filter, nothing gated in. (pandas' .query('')
+        # used to raise ValueError here -- fixed rather than preserved.)
+        ids = np.array([], dtype=np.int64)
 
     if 'Area' in channels:
         del channels['Area']
+    is_in_ids = pl.col('id').is_in(ids)
     for channel in channels:
         if channel in gates:
+            # Cast to the original column's dtype for CSV-text parity with
+            # the pandas version: csv.loc[mask, channel] = 1 silently
+            # upcast an int literal into what's typically a float64 marker
+            # column (rendering "1.0"), whereas a bare Polars int literal
+            # would render "1" -- a real text diff in the exported CSV.
+            dtype = csv.schema[channel]
             if encoding == 'binary':
-                csv.loc[csv.index.isin(ids), channel] = 1
-            csv.loc[~csv.index.isin(ids), channel] = 0
+                value_expr = pl.when(is_in_ids).then(pl.lit(1)).otherwise(pl.lit(0)).cast(dtype)
+            else:
+                value_expr = pl.when(is_in_ids).then(pl.col(channel)).otherwise(pl.lit(0).cast(dtype))
+            csv = csv.with_columns(value_expr.alias(channel))
         else:
-            csv[channel] = 0
+            csv = csv.with_columns(pl.lit(0).alias(channel))
 
     return csv
 
@@ -565,24 +654,37 @@ def download_gates(datasource_name, gates, channels, lassos):
     global ball_tree
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
-    arr = []
+    _ensure_loaded(datasource_name)
+    rows = []
     for key, value in channels.items():
-        arr.append([key, value[0], value[1]])
-    csv = pd.DataFrame(arr)
-    csv.columns = ['channel', 'gate_start', 'gate_end']
-    csv['gate_active'] = False
+        rows.append([key, value[0], value[1]])
+    csv = pl.DataFrame(rows, schema=['channel', 'gate_start', 'gate_end'], orient='row')
+    csv = csv.with_columns(pl.lit(False).alias('gate_active'))
+
+    schema = csv.schema
     for channel in gates:
-        csv.loc[csv['channel'] == channel, 'gate_active'] = True
-        csv.loc[csv['channel'] == channel, 'gate_start'] = gates[channel][0]
-        csv.loc[csv['channel'] == channel, 'gate_end'] = gates[channel][1]
+        is_channel = pl.col('channel') == channel
+        csv = csv.with_columns([
+            pl.when(is_channel).then(pl.lit(True)).otherwise(pl.col('gate_active')).alias('gate_active'),
+            pl.when(is_channel).then(pl.lit(gates[channel][0]).cast(schema['gate_start']))
+              .otherwise(pl.col('gate_start')).alias('gate_start'),
+            pl.when(is_channel).then(pl.lit(gates[channel][1]).cast(schema['gate_end']))
+              .otherwise(pl.col('gate_end')).alias('gate_end'),
+        ])
 
     if len(lassos) > 0:
-        csv_count = 0
-        for key, value in lassos.items():
-            csv.loc[len(csv)+csv_count] = ['Lasso', value['lasso_polygon'], np.nan, value['lasso_toggle']]
-            csv_count+=1
+        # Confirmed dead in current live usage (imageViewer.js permanently
+        # sets list_lassos = {} since lasso drawing was removed), but
+        # implemented correctly rather than skipped. lasso_polygon is a
+        # nested structure that won't unify with the float gate columns
+        # above, so build it as its own frame and concat with relaxed
+        # schema-widening instead of forcing one shared schema up front.
+        lasso_rows = [
+            {'channel': 'Lasso', 'gate_start': v['lasso_polygon'], 'gate_end': None, 'gate_active': v['lasso_toggle']}
+            for v in lassos.values()
+        ]
+        lasso_df = pl.DataFrame(lasso_rows, strict=False)
+        csv = pl.concat([csv, lasso_df], how='diagonal_relaxed')
 
     return csv
 
@@ -593,26 +695,33 @@ def save_gating_list(datasource_name, gates, channels, lassos):
     global ball_tree
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
-    arr = []
+    _ensure_loaded(datasource_name)
+    rows = []
     for key, value in channels.items():
-        arr.append([key, value[0], value[1]])
-    csv = pd.DataFrame(arr)
-    csv.columns = ['channel', 'gate_start', 'gate_end']
-    csv['gate_active'] = False
+        rows.append([key, value[0], value[1]])
+    csv = pl.DataFrame(rows, schema=['channel', 'gate_start', 'gate_end'], orient='row')
+    csv = csv.with_columns(pl.lit(False).alias('gate_active'))
+
+    schema = csv.schema
     for channel in gates:
-        csv.loc[csv['channel'] == channel, 'gate_active'] = True
-        csv.loc[csv['channel'] == channel, 'gate_start'] = gates[channel][0]
-        csv.loc[csv['channel'] == channel, 'gate_end'] = gates[channel][1]
+        is_channel = pl.col('channel') == channel
+        csv = csv.with_columns([
+            pl.when(is_channel).then(pl.lit(True)).otherwise(pl.col('gate_active')).alias('gate_active'),
+            pl.when(is_channel).then(pl.lit(gates[channel][0]).cast(schema['gate_start']))
+              .otherwise(pl.col('gate_start')).alias('gate_start'),
+            pl.when(is_channel).then(pl.lit(gates[channel][1]).cast(schema['gate_end']))
+              .otherwise(pl.col('gate_end')).alias('gate_end'),
+        ])
 
     if len(lassos) > 0:
-        csv_count = 0
-        for key, value in lassos.items():
-            csv.loc[len(csv)+csv_count] = ['Lasso', value['lasso_polygon'], np.nan, value['lasso_toggle']]
-            csv_count+=1
+        lasso_rows = [
+            {'channel': 'Lasso', 'gate_start': v['lasso_polygon'], 'gate_end': None, 'gate_active': v['lasso_toggle']}
+            for v in lassos.values()
+        ]
+        lasso_df = pl.DataFrame(lasso_rows, strict=False)
+        csv = pl.concat([csv, lasso_df], how='diagonal_relaxed')
 
-    temp = csv.to_dict(orient='records')
+    temp = csv.to_dicts()
     f = pickle.dumps(temp, protocol=4)
     database_model.save_list(database_model.GatingList, datasource=datasource_name, cells=f)
 
@@ -628,22 +737,28 @@ def download_channels(datasource_name, map_channels, active_channels, list_color
     global ball_tree
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
-    arr = []
+    _ensure_loaded(datasource_name)
+    rows = []
     for channel in map_channels:
         channel_name = map_channels[channel]
-        arr.append([channel_name, list_channels[channel_name][0], list_channels[channel_name][1], 255, 255, 255, 1, False])
-    csv = pd.DataFrame(arr)
-    csv.columns = ['channel', 'start', 'end', 'r', 'g', 'b', 'opacity', 'channel_active']
+        rows.append([channel_name, list_channels[channel_name][0], list_channels[channel_name][1], 255, 255, 255, 1, False])
+    csv = pl.DataFrame(rows, schema=['channel', 'start', 'end', 'r', 'g', 'b', 'opacity', 'channel_active'], orient='row')
 
+    schema = csv.schema
     for channel in list_colors:
-        csv.loc[csv['channel'] == map_channels[channel], 'r'] = list_colors[channel]['color']['r']
-        csv.loc[csv['channel'] == map_channels[channel], 'g'] = list_colors[channel]['color']['g']
-        csv.loc[csv['channel'] == map_channels[channel], 'b'] = list_colors[channel]['color']['b']
-        csv.loc[csv['channel'] == map_channels[channel], 'opacity'] = list_colors[channel]['color']['opacity']
+        is_channel = pl.col('channel') == map_channels[channel]
+        color = list_colors[channel]['color']
+        csv = csv.with_columns([
+            pl.when(is_channel).then(pl.lit(color['r']).cast(schema['r'])).otherwise(pl.col('r')).alias('r'),
+            pl.when(is_channel).then(pl.lit(color['g']).cast(schema['g'])).otherwise(pl.col('g')).alias('g'),
+            pl.when(is_channel).then(pl.lit(color['b']).cast(schema['b'])).otherwise(pl.col('b')).alias('b'),
+            pl.when(is_channel).then(pl.lit(color['opacity']).cast(schema['opacity'])).otherwise(pl.col('opacity')).alias('opacity'),
+        ])
     for channel in active_channels:
-        csv.loc[csv['channel'] == map_channels[channel], 'channel_active'] = True
+        is_channel = pl.col('channel') == map_channels[channel]
+        csv = csv.with_columns(
+            pl.when(is_channel).then(pl.lit(True)).otherwise(pl.col('channel_active')).alias('channel_active')
+        )
 
     return csv
 
@@ -654,31 +769,68 @@ def save_channel_list(datasource_name, map_channels, active_channels, list_color
     global ball_tree
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
-    arr = []
+    _ensure_loaded(datasource_name)
+    rows = []
     for channel in map_channels:
         channel_name = map_channels[channel]
-        arr.append([channel_name, list_channels[channel_name][0], list_channels[channel_name][1], 255, 255, 255, 1, False])
-    csv = pd.DataFrame(arr)
-    csv.columns = ['channel', 'start', 'end', 'r', 'g', 'b', 'opacity', 'channel_active']
+        rows.append([channel_name, list_channels[channel_name][0], list_channels[channel_name][1], 255, 255, 255, 1, False])
+    csv = pl.DataFrame(rows, schema=['channel', 'start', 'end', 'r', 'g', 'b', 'opacity', 'channel_active'], orient='row')
 
+    schema = csv.schema
     for channel in list_colors:
-        csv.loc[csv['channel'] == map_channels[channel], 'r'] = list_colors[channel]['color']['r']
-        csv.loc[csv['channel'] == map_channels[channel], 'g'] = list_colors[channel]['color']['g']
-        csv.loc[csv['channel'] == map_channels[channel], 'b'] = list_colors[channel]['color']['b']
-        csv.loc[csv['channel'] == map_channels[channel], 'opacity'] = list_colors[channel]['color']['opacity']
+        is_channel = pl.col('channel') == map_channels[channel]
+        color = list_colors[channel]['color']
+        csv = csv.with_columns([
+            pl.when(is_channel).then(pl.lit(color['r']).cast(schema['r'])).otherwise(pl.col('r')).alias('r'),
+            pl.when(is_channel).then(pl.lit(color['g']).cast(schema['g'])).otherwise(pl.col('g')).alias('g'),
+            pl.when(is_channel).then(pl.lit(color['b']).cast(schema['b'])).otherwise(pl.col('b')).alias('b'),
+            pl.when(is_channel).then(pl.lit(color['opacity']).cast(schema['opacity'])).otherwise(pl.col('opacity')).alias('opacity'),
+        ])
     for channel in active_channels:
-        csv.loc[csv['channel'] == map_channels[channel], 'channel_active'] = True
+        is_channel = pl.col('channel') == map_channels[channel]
+        csv = csv.with_columns(
+            pl.when(is_channel).then(pl.lit(True)).otherwise(pl.col('channel_active')).alias('channel_active')
+        )
 
-    temp = csv.to_dict(orient='records')
+    temp = csv.to_dicts()
     f = pickle.dumps(temp, protocol=4)
     database_model.save_list(database_model.ChannelList, datasource=datasource_name, cells=f)
+
+
 
 
 def get_saved_channel_list(datasource_name):
     channel_list = database_model.get(database_model.ChannelList, datasource=datasource_name)
     return pickle.loads(channel_list.cells)
+
+
+def _describe_numeric(df):
+    """Vectorized equivalent of df.describe().to_dict() for numeric columns.
+    Avoids pandas' per-column describe() loop, which is slow at millions of
+    rows across dozens of columns.
+    """
+    numeric_df = df.select(cs.numeric())
+    values = numeric_df.cast(pl.Float64).to_numpy()
+    count = np.sum(~np.isnan(values), axis=0)
+    mean = np.nanmean(values, axis=0)
+    std = np.nanstd(values, axis=0, ddof=1)
+    minimum = np.nanmin(values, axis=0)
+    maximum = np.nanmax(values, axis=0)
+    q25, q50, q75 = np.nanpercentile(values, [25, 50, 75], axis=0)
+    description = {}
+    for i, column in enumerate(numeric_df.columns):
+        description[column] = {
+            'count': count[i],
+            'mean': mean[i],
+            'std': std[i],
+            'min': minimum[i],
+            '25%': q25[i],
+            '50%': q50[i],
+            '75%': q75[i],
+            'max': maximum[i],
+        }
+    return description
+
 
 
 def get_datasource_description(datasource_name):
@@ -688,13 +840,12 @@ def get_datasource_description(datasource_name):
     global config
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
 
     if datasource_name in _description_cache:
         return _description_cache[datasource_name]
 
-    description = datasource.describe().to_dict()
+    description = _describe_numeric(datasource)
     for column in description:
         column_data = datasource[column].to_numpy()
         [hist, bin_edges] = np.histogram(column_data[~np.isnan(column_data)], bins=50, density=True)
@@ -746,8 +897,7 @@ def get_channel_gmm(channel_name, datasource_name):
     global config
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
 
     cache_key = (datasource_name, channel_name)
     if cache_key in _gmm_cache:
@@ -824,8 +974,7 @@ def get_gating_gmm(channel_name, datasource_name, selection_ids):
     global config
 
     # Load if not loaded
-    if datasource_name != source:
-        load_ball_tree(datasource_name)
+    _ensure_loaded(datasource_name)
 
     selection_key = tuple(sorted(selection_ids)) if selection_ids else None
     cache_key = (datasource_name, channel_name, selection_key)
@@ -834,21 +983,39 @@ def get_gating_gmm(channel_name, datasource_name, selection_ids):
 
     packet_gmm = {}
 
-    datasource_filter = datasource.copy()
     if 'idField' in config[datasource_name]['featureData'][0]:
         idField = config[datasource_name]['featureData'][0]['idField']
     else:
         idField = "CellID"
     if selection_ids:
-        datasource_filter = datasource_filter[datasource_filter[idField].isin(selection_ids)]
+        datasource_filter = datasource.filter(pl.col(idField).is_in(selection_ids))
+    else:
+        # No selection to filter by (the only case current callers use,
+        # since lasso/spatial-selection was removed) -- avoid a full
+        # 2M-row copy that's immediately discarded.
+        datasource_filter = datasource
 
     column_data = datasource[channel_name].to_numpy()
     [hist, bin_edges] = np.histogram(column_data[~np.isnan(column_data)], bins=50, density=True)
     midpoints = (bin_edges[1:] + bin_edges[:-1]) / 2
 
     column_data_filtered = datasource_filter[channel_name].to_numpy()
+
+    # Cap the GMM fit input at a random subsample when the cell-level column
+    # is large -- EM cost scales roughly linearly with N per iteration, and
+    # a 2-component 1D mixture's fitted parameters barely move between 100k
+    # and millions of samples. Fixed seed keeps the fit deterministic per
+    # unique _gmm_cache key. The histogram above is intentionally left
+    # unaffected -- only the .fit() input is capped. get_channel_gmm (image
+    # pixel data, already ~40k points after block_reduce) is not capped.
+    GMM_FIT_SAMPLE_CAP = 100_000
+    fit_data = column_data_filtered
+    if fit_data.shape[0] > GMM_FIT_SAMPLE_CAP:
+        rng = np.random.default_rng(0)
+        fit_data = fit_data[rng.choice(fit_data.shape[0], size=GMM_FIT_SAMPLE_CAP, replace=False)]
+
     gmm = GaussianMixture(n_components=2)
-    gmm.fit(column_data_filtered.reshape((-1, 1)))
+    gmm.fit(fit_data.reshape((-1, 1)))
     i0, i1 = np.argsort(gmm.means_[:, 0])
     packet_gmm['gate'] = np.mean(gmm.means_)
 
@@ -968,9 +1135,8 @@ def convertOmeTiff(filePath, channelFilePath=None, dataDirectory=None, isLabelIm
 
 
 def logTransform(csvPath, skip_columns=[]):
-    df = pd.read_csv(csvPath)
-    for column in df.columns:
-        if column not in skip_columns:
-            df[column] = np.log1p(df[column])
-    df.to_csv(csvPath, index=False)
+    df = pl.read_csv(csvPath)
+    transform_cols = [c for c in df.columns if c not in skip_columns]
+    df = df.with_columns([pl.col(c).log1p().alias(c) for c in transform_cols])
+    df.write_csv(csvPath)
 

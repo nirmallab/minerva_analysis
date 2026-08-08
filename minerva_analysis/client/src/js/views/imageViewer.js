@@ -484,12 +484,16 @@ class ImageViewer {
         this.viewer.addHandler("open", initGL);
 
 
-        // Add automatic tile cache monitoring and clearing
+        // Add automatic tile cache monitoring, evicting least-recently-used
+        // tiles per channel instead of clearing every channel's pyramid at
+        // once (see evictLeastRecentlyUsedTiles).
         setInterval(() => {
             if (this.viewer && this.viewer.world) {
+                const itemCount = this.viewer.world.getItemCount();
+                if (itemCount === 0) return;
                 let totalTiles = 0;
                 // Use the correct OpenSeadragon API method
-                for (let i = 0; i < this.viewer.world.getItemCount(); i++) {
+                for (let i = 0; i < itemCount; i++) {
                     const item = this.viewer.world.getItemAt(i);
                     if (item && item._tileCache && item._tileCache._tilesLoaded) {
                         totalTiles += item._tileCache._tilesLoaded.length || 0;
@@ -497,8 +501,9 @@ class ImageViewer {
                 }
 
                 if (totalTiles > 1000) {
-                    console.warn(`Large tile cache detected: ${totalTiles} tiles. Automatically clearing cache...`);
-                    this.clearTileCache();
+                    const perItemBudget = Math.max(150, Math.floor(1000 / itemCount));
+                    console.warn(`Large tile cache detected: ${totalTiles} tiles. Evicting least-recently-used tiles (budget ${perItemBudget}/channel)...`);
+                    this.evictLeastRecentlyUsedTiles(perItemBudget);
                 }
             }
         }, 30000); // Check every 30 seconds
@@ -882,8 +887,16 @@ class ImageViewer {
             });
             const m = await this.numericData.getAllFloat32Entries(newKeys);
             const nNew = newKeys.length;
+            // Deinterleave in one linear pass instead of one full-array
+            // .filter() per key (was O(nNew^2 * cellCount)).
+            const perKey = newKeys.map(() => new Float32Array(m.length / nNew));
+            for (let i = 0, o = 0; i < m.length; i += nNew, o++) {
+                for (let ki = 0; ki < nNew; ki++) {
+                    perKey[ki][o] = m[i + ki];
+                }
+            }
             newKeys.forEach((k, ki) => {
-                const mk = m.filter((_, i) => i % nNew == ki);
+                const mk = perKey[ki];
                 // Attempt to bind marker magnitude texture
                 try {
                     this.bindMagnitudes(this.viaGL, mk, k);
@@ -1488,13 +1501,32 @@ class ImageViewer {
         const zoomScale = 2 ** (this.config.extraZoomLevels || 0);
         this.fullResolutionCenters = new Float32Array(centers.length);
         this.idToCenterOffset = new Map();
+        // Coarse spatial bucket index (same floor-by-tile-span idea as
+        // centroid_tiles.py's tile bucketing) so a full redraw only walks
+        // points near the current viewport instead of every cell.
+        this.legacyCentroidBucketSpan = Math.max(1, this.config.tileWidth || 512);
+        this.legacyCentroidBuckets = new Map();
         for (let i = 0; i < centers.length; i += 2) {
-            this.fullResolutionCenters[i] = centers[i] * zoomScale;
-            this.fullResolutionCenters[i + 1] = centers[i + 1] * zoomScale;
+            const x = centers[i] * zoomScale;
+            const y = centers[i + 1] * zoomScale;
+            this.fullResolutionCenters[i] = x;
+            this.fullResolutionCenters[i + 1] = y;
             if (ids[i / 2] !== undefined) {
                 this.idToCenterOffset.set(Number(ids[i / 2]), i);
             }
+            const bucketKey = this.legacyCentroidBucketKey(x, y);
+            let bucket = this.legacyCentroidBuckets.get(bucketKey);
+            if (!bucket) {
+                bucket = [];
+                this.legacyCentroidBuckets.set(bucketKey, bucket);
+            }
+            bucket.push(i);
         }
+    }
+
+    legacyCentroidBucketKey(x, y) {
+        const span = this.legacyCentroidBucketSpan;
+        return `${Math.floor(x / span)}_${Math.floor(y / span)}`;
     }
 
     getVisibleCentroidTileState() {
@@ -1822,6 +1854,23 @@ class ImageViewer {
                     drawAtOffset(offset);
                 }
             });
+        } else if (this.legacyCentroidBuckets) {
+            // Only walk buckets overlapping the current viewport instead of
+            // every cell in the dataset.
+            const span = this.legacyCentroidBucketSpan;
+            const minTx = Math.floor(minX / span);
+            const maxTx = Math.floor(maxX / span);
+            const minTy = Math.floor(minY / span);
+            const maxTy = Math.floor(maxY / span);
+            for (let tx = minTx; tx <= maxTx; tx += 1) {
+                for (let ty = minTy; ty <= maxTy; ty += 1) {
+                    const bucket = this.legacyCentroidBuckets.get(`${tx}_${ty}`);
+                    if (!bucket) continue;
+                    for (const offset of bucket) {
+                        drawAtOffset(offset);
+                    }
+                }
+            }
         } else {
             for (let i = 0; i < centers.length; i += 2) {
                 drawAtOffset(i);
@@ -1854,6 +1903,40 @@ class ImageViewer {
             loader.style.display = isLoading ? "flex" : "none";
         }
     }
+
+
+    /**
+     * @function evictLeastRecentlyUsedTiles - per-item LRU tile eviction,
+     *   using OpenSeadragon's own tile.lastTouchTime, instead of clearing
+     *   every channel's whole pyramid when the shared tile budget is hit.
+     * @param perItemBudget - max tiles to keep loaded per TiledImage
+     */
+    evictLeastRecentlyUsedTiles(perItemBudget) {
+        if (!this.viewer || !this.viewer.world) return;
+        for (let i = 0; i < this.viewer.world.getItemCount(); i++) {
+            const item = this.viewer.world.getItemAt(i);
+            const loaded = item?._tileCache?._tilesLoaded;
+            if (!loaded || loaded.length <= perItemBudget) continue;
+            const oldestFirst = loaded.slice().sort(
+                (a, b) => (a.tile?.lastTouchTime || 0) - (b.tile?.lastTouchTime || 0)
+            );
+            const excess = oldestFirst.length - perItemBudget;
+            for (let k = 0; k < excess; k += 1) {
+                const tileRecord = oldestFirst[k];
+                if (tileRecord.tile && tileRecord.tile.unload) {
+                    tileRecord.tile.unload();
+                }
+                const idx = loaded.indexOf(tileRecord);
+                if (idx !== -1) {
+                    loaded.splice(idx, 1);
+                }
+                tileRecord.tile = null;
+            }
+        }
+        this.viewer.forceRedraw();
+    }
+
+
 
     /**
      * @function clearTileCache - Clears the tile cache to free memory

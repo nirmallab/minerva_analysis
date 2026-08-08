@@ -13,7 +13,7 @@ from pathlib import PurePath
 
 import werkzeug.datastructures as wz
 import numpy as np
-import pandas as pd
+import polars as pl
 import shutil
 import csv
 import json
@@ -300,11 +300,12 @@ def upload_file_page():
                 config_data['datasources'] = get_config_names()
                 config_data['datasources'].append(datasetName)
 
-                datasource = pd.read_csv(csvPath)
+                datasource = pl.read_csv(csvPath)
                 listNotMarkers = ['CellID', 'X_centroid', 'Y_centroid', 'Area', 'MajorAxisLength', 'MinorAxisLength', 'Eccentricity', 'Solidity', 'Extent', 'Orientation', 'column_centroid', 'row_centroid', 'phenotype']
                 listImageData = [name for name in header_full_names if name not in listNotMarkers]
-                datasourceImageData = datasource[[*listImageData]]
-                if np.mean(np.mean(datasourceImageData)) < 15:
+                datasourceImageData = datasource.select(listImageData)
+                col_means = datasourceImageData.mean().row(0)
+                if float(np.mean(col_means)) < 15:
                     config_data["isTransformed"] = True
                 else:
                     config_data["isTransformed"] = False
