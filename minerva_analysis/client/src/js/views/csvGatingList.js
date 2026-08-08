@@ -128,7 +128,7 @@ class CSVGatingList {
             // column within row that contains svg for color pickers
             let svgCol = document.createElement("div");
             svgCol.classList.add("col-md-4");
-            svgCol.classList.add("ml-auto");
+            svgCol.classList.add("ms-auto");
             svgCol.classList.add("gating-col");
             svgCol.classList.add("gating-svg-wrapper");
             svgCol.classList.add("col-svg-wrapper");
@@ -162,7 +162,7 @@ class CSVGatingList {
 
             let autoCol = document.createElement("div");
             autoCol.classList.add("col-md-4");
-            autoCol.classList.add("ml-auto");
+            autoCol.classList.add("ms-auto");
             autoCol.classList.add("csv_gating-auto")
             autoCol.setAttribute('id', "csv_gating-auto_" + channelID)
             autoCol.classList.add("gating-col");

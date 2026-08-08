@@ -1,7 +1,6 @@
 import {Buffer} from 'buffer/';
 import {PNG} from 'pngjs'
 import UPNG from 'upng-js'
-import 'popper.js'
 import 'jquery'
 import 'bootstrap'
 import 'bootstrap/dist/css/bootstrap.min.css';

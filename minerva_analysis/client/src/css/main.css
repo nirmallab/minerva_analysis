@@ -274,12 +274,12 @@ nav {
 
 
 #channel-match-container .list-group-item {
-    height: 30px;
+    min-height: 30px;
     padding: 0 .6rem;
     border-radius: 0;
 }
 
-#channel-match-container .form-group {
+#channel-match-container .channel-row {
     margin: 0rem;
     display: flex;
     align-items: center;

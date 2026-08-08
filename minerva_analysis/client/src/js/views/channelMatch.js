@@ -99,7 +99,7 @@ function channelMatch(data) {
         let displayName = _.get(header, 'displayName', fullName);
         rightList.innerHTML +=
             `<div class="list-group-item card justify-content-center channel">
-                <div class="form-group row">
+                <div class="channel-row row">
                     <label for="fullName${i}"   class="col-auto col-form-label">Full Name&nbsp;</label>
                     <input type="text" readonly class="form-control-plaintext col-4" id="fullName${i}"  name="fullName${i}"value="${fullName}">
                     <label for="name${i}"   class="col-auto col-form-label">Display Name&nbsp;</label>
@@ -157,7 +157,7 @@ function channelMatch(data) {
     const markOptions = {
         exclude: ['label, input']
     };
-    $("#substring").bind("change paste keyup", function () {
+    $("#substring").on("change paste keyup", function () {
         let val = $(this).val();
         markInstance.unmark({
             done: function () {
@@ -230,7 +230,7 @@ function removeSelections() {
 
 function serializeForm() {
     let serializedForm = [];
-    _.map($('.form-group'), elem => {
+    _.map($('.channel-row'), elem => {
         // let labels =  $(elem).find('label');
         let inputs = $(elem).find('input, .shortname');
         _.map(inputs, input => {

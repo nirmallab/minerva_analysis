@@ -162,7 +162,7 @@ class ChannelList {
             // column within row that contains svg for color pickers
             let svgCol = document.createElement("div");
             svgCol.classList.add("col-md-4");
-            svgCol.classList.add("ml-auto");
+            svgCol.classList.add("ms-auto");
             svgCol.classList.add("channel-col");
             svgCol.classList.add("channel-svg-wrapper");
             svgCol.classList.add("col-svg-wrapper");
@@ -196,7 +196,7 @@ class ChannelList {
 
             let autoCol = document.createElement("div");
             autoCol.classList.add("col-md-4");
-            autoCol.classList.add("ml-auto");
+            autoCol.classList.add("ms-auto");
             autoCol.classList.add("image-auto")
             autoCol.setAttribute('id', "image-auto_" + channelID)
             autoCol.classList.add("channel-col");
