@@ -344,37 +344,6 @@ def progress():
     return Response(generate(), mimetype='text/event-stream')
 
 
-# Matches channels to CSV Headers
-@app.route('/channel-test')
-def channel():
-    test_data = {}
-    test_data['csvHeader'] = ['A488_background_none_1Nuclei', 'A555_background_none_2Nuclei', 'A555_Alexa555_18Nuclei',
-                              'A647_background_none_3Nuclei', 'CATENIN_Alexa647_19Nuclei', 'CD3_Alexa555_10Nuclei',
-                              'CD45RO_Alexa488_13Nuclei', 'CD45_Alexa555_30Nuclei', 'CD4_Alexa488_9Nuclei',
-                              'CD8_Alexa647_11Nuclei', 'DNA2_Hoechst33342_4Nuclei', 'DNA3_Hoechst33342_8Nuclei',
-                              'DNA4_Hoechst33342_12Nuclei', 'DNA5_Hoechst33342_16Nuclei', 'DNA6_Hoechst33342_20Nuclei',
-                              'DNA7_Hoechst33342_24Nuclei', 'DNA8_Hoechst33342_28Nuclei', 'DNA9_Hoechst33342_32Nuclei',
-                              'DNA_Hoechst33342_0Nuclei', 'ECAD_Alexa488_17Nuclei', 'FOXP3_Alexa555_14Nuclei',
-                              'HES1_Alexa647_27Nuclei', 'KERATIN_Alexa555_26Nuclei', 'KI67_Alexa488_5Nuclei',
-                              'MITF_Alexa488_25Nuclei', 'NGFR_Alexa647_23Nuclei', 'PD1_Alexa647_15Nuclei',
-                              'PDL1_Alexa647_7Nuclei', 'S100_Alexa488_33Nuclei', 'SMA_Alexa647_35Nuclei',
-                              'VEGFR2_Alexa555_34Nuclei', 'VIMENTIN_Alexa555_6Nuclei', 'cJUN_Alexa488_21Nuclei',
-                              'pERKz_Alexa647_31Nuclei', 'pRB_Alexa555_22Nuclei', 'pS6_Alexa488_29Nuclei',
-                              'NucleusArea', 'CellPosition_X', 'CellPosition_Y']
-    test_data['datasetName'] = 'channelConfigs'
-    test_data['substring'] = mostFrequentLongestSubstring.find_substring(test_data['csvHeader'])
-    test_data['channelFileNames'] = ['ID', 'Area', 'X Position', 'Y Position', 'channel_01', 'channel_02']
-    test_data['normCsvName'] = 'segResultsRF_norm.csv'
-    test_data['csvName'] = 'segResultsRF.csv'
-    test_data['labelName'] = 'nucleiLabelRF'
-    test_data['new'] = True
-    test_data['datasources'] = get_config_names()
-    test_data['is_docker'] = app.config.get('IS_DOCKER', False)
-    test_data['base_url'] = app.config.get('MINERVA_BASE_URL', '')
-
-    return render_template('channel_match.html', data=test_data)
-
-
 @app.route('/save_config', methods=['POST'])
 def save_config():
     global config_json_path

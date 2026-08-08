@@ -124,7 +124,6 @@ minerva_analysis/client/src/img/logo_with_text.ai
 minerva_analysis/client/src/img/logo_with_text.svg
 minerva_analysis/client/src/js/main.js
 minerva_analysis/client/src/js/vendor.js
-minerva_analysis/client/src/js/services/colorScheme.js
 minerva_analysis/client/src/js/services/dataLayer.js
 minerva_analysis/client/src/js/services/importFormValidation.js
 minerva_analysis/client/src/js/services/numericData.js
@@ -136,18 +135,14 @@ minerva_analysis/client/src/js/views/csvGatingList.js
 minerva_analysis/client/src/js/views/imageViewer.js
 minerva_analysis/client/src/js/views/rainbow.js
 minerva_analysis/client/src/js/views/viewerManager.js
-minerva_analysis/client/src/js/views/lensingFilters/lfChannelRelationships.js
-minerva_analysis/client/src/js/views/lensingFilters/lfChannelView.js
-minerva_analysis/client/src/js/views/lensingFilters/lfDataColors.js
-minerva_analysis/client/src/js/views/lensingFilters/lfNearestCell.js
-minerva_analysis/client/src/js/views/lensingFilters/lfNearestCells.js
-minerva_analysis/client/src/js/views/lensingFilters/lfSegmentationOutlines.js
+minerva_analysis/client/src/js/views/viewerSidebar.js
 minerva_analysis/client/src/shaders/frag.glsl
 minerva_analysis/client/src/shaders/vert.glsl
 minerva_analysis/client/templates/base.html
 minerva_analysis/client/templates/channel_match.html
 minerva_analysis/client/templates/index.html
 minerva_analysis/client/templates/upload.html
+minerva_analysis/server/models/centroid_tiles.py
 minerva_analysis/server/models/data_model.py
 minerva_analysis/server/models/database_model.py
 minerva_analysis/server/routes/data_routes.py
@@ -161,3 +156,4 @@ minerva_analysis/server/utils/pyramid_assemble.py
 minerva_analysis/server/utils/pyramid_upgrade.py
 minerva_analysis/server/utils/smallestenclosingcircle.py
 minerva_analysis/server/utils/tiffsurgeon.py
+tests/test_centroid_tiles.py

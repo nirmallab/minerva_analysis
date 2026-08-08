@@ -10,8 +10,6 @@ import pandas as pd
 import gzip
 import json
 import orjson
-import os
-import sys
 from os import walk
 from flask_sqlalchemy import SQLAlchemy
 
@@ -52,52 +50,6 @@ def get_channel_names():
     datasource = request.args.get('datasource')
     shortnames = bool(request.args.get('shortNames'))
     resp = data_model.get_channel_names(datasource, shortnames)
-    return serialize_and_submit_json(resp)
-
-
-@app.route('/get_phenotypes', methods=['GET'])
-def get_phenotypes():
-    datasource = request.args.get('datasource')
-    resp = data_model.get_phenotypes(datasource)
-    return serialize_and_submit_json(resp)
-
-
-@app.route('/get_color_scheme', methods=['GET'])
-def get_color_scheme():
-    datasource = request.args.get('datasource')
-    refresh = request.args.get('refresh') == 'true'
-    resp = data_model.get_color_scheme(datasource, refresh)
-    return serialize_and_submit_json(resp)
-
-
-@app.route('/get_neighborhood', methods=['GET'])
-def get_neighborhood():
-    x = float(request.args.get('point_x'))
-    y = float(request.args.get('point_y'))
-    max_distance = float(request.args.get('max_distance'))
-    datasource = request.args.get('datasource')
-    resp = data_model.get_neighborhood(x, y, datasource, r=max_distance)
-    return serialize_and_submit_json(resp)
-
-@app.route('/get_naive_states', methods=['GET'])
-def get_naive_states():
-    # test of triggering docker module
-    # Note: This route is disabled in PyInstaller builds to prevent process spawning issues
-    if getattr(sys, 'frozen', False):
-        return {"error": "Docker functionality disabled in executable build"}, 400
-    
-    dirname = os.path.dirname(__file__)
-    os.system('docker run --rm -v' + dirname + '/data:/data labsyspharm/naivestates:1.7.0 /app/main.R -i /data/unmicst-163.csv')
-    os.path.join(os.getcwd() / data_path / "data"  / "umicst-162-models.csv")
-
-
-@app.route('/get_num_cells_in_circle', methods=['GET'])
-def get_num_cells_in_circle():
-    datasource = request.args.get('datasource')
-    x = float(request.args.get('point_x'))
-    y = float(request.args.get('point_y'))
-    r = float(request.args.get('radius'))
-    resp = data_model.get_number_of_cells_in_circle(x, y, datasource, r=r)
     return serialize_and_submit_json(resp)
 
 
@@ -217,19 +169,6 @@ def upload_channels():
     file.save(Path(save_path / filename))
     resp = jsonify(success=True)
     return resp
-
-@app.route('/get_rect_cells', methods=['GET'])
-def get_rect_cells():
-    # Parse (rect - [x, y, r], channels [string])
-    datasource = request.args.get('datasource')
-    rect = [float(x) for x in request.args.get('rect').split(',')]
-    channels = request.args.get('channels')
-
-    # Retrieve cells - FIXME: Too slow - jam is stalling image loading
-    resp = data_model.get_rect_cells(datasource, rect, channels)
-    print('Neighborhood size:', len(resp))
-    return serialize_and_submit_json(resp)
-
 
 @app.route('/get_ome_metadata', methods=['GET'])
 def get_ome_metadata():
@@ -373,18 +312,3 @@ def serialize_and_submit_json(data):
     )
     return response
 
-@app.route('/get_cells_in_polygon', methods=['POST'])
-def get_cells_in_polygon():
-    post_data = json.loads(request.data)
-    datasource = post_data['datasource']
-    points = post_data['points']
-    resp = data_model.get_cells_in_polygon(datasource, points)
-    return serialize_and_submit_json(resp)
-
-@app.route('/get_cells_in_lassos', methods=['POST'])
-def get_cells_in_lassos():
-    post_data = json.loads(request.data)
-    datasource = post_data['datasource']
-    list_lassos = post_data['list_lassos']
-    resp = data_model.get_cells_in_lassos(datasource, list_lassos)
-    return serialize_and_submit_json(resp)

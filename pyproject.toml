@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minerva-analysis"
-version = "1.0.2"
+version = "1.0.6"
 description = "OpenSeadragon-based cellular image viewing and analysis tool."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -24,7 +24,6 @@ dependencies = [
     "pandas>=3.0",
     "Pillow>=10.4",
     "pydantic>=2.13,<2.14",
-    "requests",
     "scikit-image",
     "scikit-learn>=1.9",
     "scipy",

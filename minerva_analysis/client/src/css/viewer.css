@@ -675,29 +675,6 @@ body.sidebar-collapsed .viewer-shell,
 .col-svg-wrapper {
 }
 
-.lasso_selection_toggle {
-    color: orange;
-    cursor: pointer;
-    float: right;
-    margin-left: auto;
-    margin-right: 20px;
-    margin-top: 3px;
-}
-
-.lasso_polygon {
-    fill-opacity: 0;
-    stroke: orange;
-    stroke-width: 3px;
-    vector-effect: non-scaling-stroke;
-}
-
-.btn_lasso_delete {
-    border: 1px;
-    float: right;
-    padding-bottom: 0;
-    padding-top: 0;
-}
-
 @media (max-width: 900px) {
     .viewer-shell {
         grid-template-columns: 100%;

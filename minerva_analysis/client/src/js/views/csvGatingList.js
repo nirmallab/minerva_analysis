@@ -262,10 +262,10 @@ class CSVGatingList {
         }
 
         this.eventHandler.trigger(CSVGatingList.events.RESET_GATINGLIST)
-        let list_uploaded_lassos = [];
         _.each(gates, async (col) => {
             if (col.channel == 'Lasso') {
-                list_uploaded_lassos.push(col);
+                // Lasso-drawn regions are no longer supported; ignore any
+                // legacy 'Lasso' rows from older saved/exported gate lists.
             } else {
                 let shortName = this.dataLayer.getShortChannelName(col.channel);
                 let channelID = this.gatingIDs[shortName];
@@ -314,17 +314,6 @@ class CSVGatingList {
         })
         // Trigger brush
         this.eventHandler.trigger(CSVGatingList.events.GATING_BRUSH_END, this.selections);
-
-        await this.seaDragonViewer.clear_lassos();
-        if (source === 'file') {
-            list_uploaded_lassos = list_uploaded_lassos.map(item => {
-                item['gate_start'] = JSON.parse(item['gate_start'].replace(/'/g, '"'));
-                return item;
-            });
-        }
-        for (let lasso of list_uploaded_lassos) {
-            await this.seaDragonViewer.upload_lasso(lasso);
-        }
     }
 
     /**
@@ -804,43 +793,6 @@ class CSVGatingList {
         autoBtn.classList.remove("auto-loading")
 
         this.drawGatingGMM(name);
-    }
-
-    async updateGMM(selection_ids) {
-        for (let name in this.hasGatingGMM) {
-            await this.getGatingGMM(name, selection_ids = selection_ids);
-
-            const fullName = this.dataLayer.getFullChannelName(name);
-            const { xDomain, yDomain } = this.histogramData(fullName);
-            const packet = this.hasGatingGMM[name];
-            let gmm1Data = packet['gmm_1'];
-            let gmm2Data = packet['gmm_2'];
-            const gmm1_yMax = Math.max(...gmm1Data.map(obj => obj.y));
-            const gmm2_yMax = Math.max(...gmm2Data.map(obj => obj.y));
-            const yMax = Math.max(gmm1_yMax, gmm2_yMax);
-            const gmm_yDomain = [yMax, 0]
-
-            const gatingListEl = document.getElementById("csv_gating_list");
-            const swidth = gatingListEl.getBoundingClientRect().width;
-
-            let xScale = d3.scaleLinear()
-                .domain(xDomain)
-                .range([0, swidth - 73])
-
-            let yScale = d3.scaleLinear()
-                .domain(gmm_yDomain)
-                .range([0, 25])
-
-            let line = d3.line()
-                .x(d => xScale(d.x))
-                .y(d => yScale(d.y))
-                .curve(d3.curveMonotoneX)
-
-            let channel_gmm1 = d3.select('#gmm1_line_' + name)
-            let channel_gmm2 = d3.select('#gmm2_line_' + name)
-            channel_gmm1.data([gmm1Data]).transition().duration(1000).attr('d', line)
-            channel_gmm2.data([gmm2Data]).transition().duration(1000).attr('d', line)
-        }
     }
 
     /**

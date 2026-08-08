@@ -16,7 +16,6 @@ dependencies:
   - pip
   - pyinstaller
   - python=3.13
-  - requests
   - scikit-image
   - scikit-learn
   - scipy

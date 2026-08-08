@@ -1,4 +1,8 @@
-"""Baseline smoke checks for the local orion2 Minerva datasource.
+"""Baseline smoke checks for a local Minerva datasource.
+
+Defaults to the `orion2` datasource; override with the
+MINERVA_BASELINE_DATASOURCE env var (e.g. `orion_mac` on macOS, since
+`orion2`'s files live only on the Windows side of this Dropbox-synced repo).
 
 Run directly:
     python -m tests.baseline_orion2
@@ -49,7 +53,7 @@ def _skip_reason():
         if not path.exists()
     ]
     if missing:
-        return "Missing local orion2 inputs: " + "; ".join(missing)
+        return f"Missing local {DATASOURCE!r} inputs: " + "; ".join(missing)
     return None
 
 
@@ -93,7 +97,10 @@ class Orion2BaselineTest(unittest.TestCase):
         self.assertIn("CD3e", channels)
 
     def test_image_and_segmentation_tiles_render_pngs(self):
-        image_response = self.client.get("/generated/data/orion2/image_12/0/2_2.png")
+        channel_name = self.ds_config["imageData"][1]["src"].strip("/").split("/")[-1]
+        image_response = self.client.get(
+            f"/generated/data/{DATASOURCE}/{channel_name}/0/2_2.png"
+        )
         self.assertEqual(image_response.status_code, 200)
         self.assertEqual(image_response.mimetype.lower(), "image/png")
         self.assertGreater(len(image_response.data), 100)

@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: minerva-analysis
-Version: 1.0.2
+Version: 1.0.6
 Summary: OpenSeadragon-based cellular image viewing and analysis tool.
 License-Expression: MIT
 Requires-Python: <3.14,>=3.12
@@ -20,7 +20,6 @@ Requires-Dist: orjson>=3.11
 Requires-Dist: pandas>=3.0
 Requires-Dist: Pillow>=10.4
 Requires-Dist: pydantic<2.14,>=2.13
-Requires-Dist: requests
 Requires-Dist: scikit-image
 Requires-Dist: scikit-learn>=1.9
 Requires-Dist: scipy
@@ -80,7 +79,7 @@ To import your imaging files in the import gui type in the mounted `/data/..`
 * Create env:  `conda env create -f requirements.yml`
 
 ##### Activate Environment
-* Active environment: `conda activate minerva_analysis`
+* Active environment: `conda activate minerva`
 
 
 ##### Start the Server

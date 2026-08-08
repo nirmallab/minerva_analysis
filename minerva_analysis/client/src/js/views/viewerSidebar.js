@@ -64,7 +64,14 @@ class ViewerSidebar {
 
         const gateAuto = document.getElementById("gate_auto_button");
         gateAuto.addEventListener("click", async () => {
-            await this.autoGate();
+            gateAuto.disabled = true;
+            gateAuto.classList.add("auto-loading");
+            try {
+                await this.autoGate();
+            } finally {
+                gateAuto.disabled = false;
+                gateAuto.classList.remove("auto-loading");
+            }
         });
 
         const addButton = document.getElementById("add_channel_button");
@@ -203,6 +210,7 @@ class ViewerSidebar {
 
     setGateMarker(name, options = {}) {
         if (!name) return;
+        if (name === this.gateMarker && !options.force) return;
         const enableSlot = options.enableSlot !== false;
         this.gateMarker = name;
         const select = document.getElementById("gate_marker_select");
@@ -222,9 +230,6 @@ class ViewerSidebar {
         this.updateGateReadout(range);
         this.eventHandler.trigger(CSVGatingList.events.GATING_BRUSH_MOVE, this.gatingList.selections);
         this.eventHandler.trigger(CSVGatingList.events.GATING_BRUSH_END, this.gatingList.selections);
-        if (!(name in this.gatingList.hasGatingGMM)) {
-            this.gatingList.getGatingGMM(name).then(() => this.drawGateDistribution());
-        }
     }
 
     redrawGateSlider() {
@@ -338,6 +343,9 @@ class ViewerSidebar {
         const slot = this.channelSlots[slotIndex];
         if (!slot || !name) return;
         const markerChanged = slot.name !== name;
+        const enablesSlot = options.enable && !slot.enabled;
+        const revealsSlot = options.reveal && !slot.visible;
+        if (!markerChanged && !enablesSlot && !revealsSlot && !options.force) return;
         if (slot.name && slot.enabled && markerChanged) {
             this.deactivateChannel(slot);
         }

@@ -181,24 +181,6 @@ async function init(config) {
         seaDragonViewer.forceRepaint();
     }
 
-    /**
-     * Add picked cell ids from lasso selection
-     */
-    const imageLassoSel = (d) => {
-        updateSeaDragonSelection(d);
-        csv_gatingList.updateGMM(d['picked']);
-    };
-    eventHandler.bind(ImageViewer.events.imageLassoSel, imageLassoSel);
-
-    /**
-     * Remove currently selected picked cell ids
-     */
-    function clearSeaDragonSelection() {
-      updateSeaDragonSelection({ picked: [] });
-      csv_gatingList.updateGMM([]);
-    }
-    eventHandler.bind(ImageViewer.events.clearImageLasso, clearSeaDragonSelection);
-
     let centroidGateRequest = 0;
     const updateCentroidsForGate = async () => {
         if (!seaDragonViewer.shouldDrawCentroids()) return;

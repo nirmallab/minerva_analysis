@@ -476,19 +476,6 @@ class DataLayer {
         }
     }
 
-    async getColorScheme(refresh = false) {
-        try {
-            let response = await fetch(minervaUrl('get_color_scheme') + '?' + new URLSearchParams({
-                datasource: datasource,
-                refresh: refresh
-            }))
-            let response_data = await response.json();
-            return response_data;
-        } catch (e) {
-            console.log("Error Getting Sample Row", e);
-        }
-    }
-
     async getNearestCell(point_x, point_y) {
         try {
             let response = await fetch(minervaUrl('get_nearest_cell') + '?' + new URLSearchParams({
@@ -501,25 +488,6 @@ class DataLayer {
         } catch (e) {
             console.log("Error Getting Nearest Cell", e);
         }
-    }
-
-    async getNeighborhood(maxDistance, x, y) {
-        try {
-            let response = await fetch(minervaUrl('get_neighborhood') + '?' + new URLSearchParams({
-                point_x: x,
-                point_y: y,
-                max_distance: maxDistance,
-                datasource: datasource
-            }))
-            let neighborhood = await response.json();
-            return neighborhood;
-        } catch (e) {
-            console.log("Error Getting Nearest Cell", e);
-        }
-    }
-
-    async getNeighborhoodForCell(maxDistance, selectedCell) {
-        return this.getNeighborhood(maxDistance, selectedCell[this.x], selectedCell[this.y]);
     }
 
 
@@ -631,48 +599,5 @@ class DataLayer {
       return false;
     }
 
-     async getCellsInPolygon(points) {
-        try {
-            let response = await fetch(minervaUrl('get_cells_in_polygon'), {
-                method: 'POST',
-                headers: {
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(
-                    {
-                        datasource: datasource,
-                        points: points,
-                    }
-                )
-            });
-            let cells = await response.json();
-            return cells;
-        } catch (e) {
-            console.log("Error Getting Polygon Cells", e);
-        }
-    }
-
-    async getCellsInLassos(list_lassos) {
-        try {
-            let response = await fetch(minervaUrl('get_cells_in_lassos'), {
-                method: 'POST',
-                headers: {
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(
-                    {
-                        datasource: datasource,
-                        list_lassos: list_lassos,
-                    }
-                )
-            });
-            let cells = await response.json();
-            return cells;
-        } catch (e) {
-            console.log("Error Getting Cells in Lassos", e);
-        }
-    }
 
 }
