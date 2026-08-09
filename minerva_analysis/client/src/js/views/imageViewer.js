@@ -118,6 +118,23 @@ class ImageViewer {
         this.addScaleBar();
         this.selectionPolygonToDraw = [];
 
+        // OSD's own full-page button only resizes the #openseadragon element
+        // itself (it reparents that element to <body>), leaving the sidebar
+        // behind. Redirect it to a native Fullscreen API toggle on the whole
+        // app shell (sidebar + viewer) instead.
+        this.viewer.addHandler("pre-full-page", (event) => {
+            event.preventDefaultAction = true;
+            const shell = document.getElementById("bodyDiv");
+            if (!shell) {
+                return;
+            }
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else {
+                shell.requestFullscreen();
+            }
+        });
+
         // Get and shrink all button images
         this.parent = d3.select(`#openseadragon`);
         this.parent.selectAll('img')

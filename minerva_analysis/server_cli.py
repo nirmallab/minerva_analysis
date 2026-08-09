@@ -19,9 +19,11 @@ def main(argv=None):
         os.environ["MINERVA_NOTEBOOK_MODE"] = "1"
 
     from waitress import serve
-    from minerva_analysis import app
+    from minerva_analysis import app, _clean_base_url
 
     app.config["MINERVA_NOTEBOOK_MODE"] = args.notebook_mode or app.config.get("MINERVA_NOTEBOOK_MODE", False)
+    if args.base_url is not None:
+        app.config["MINERVA_BASE_URL"] = _clean_base_url(args.base_url)
     print(f"Serving Minerva Analysis on {args.host}:{args.port}")
     serve(
         app,

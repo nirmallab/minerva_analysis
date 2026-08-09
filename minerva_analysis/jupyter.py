@@ -16,9 +16,7 @@ _SERVERS = {}
 
 
 def _default_data_dir():
-    from minerva_analysis import data_path
-
-    return data_path
+    return Path(__file__).resolve().parent / "data"
 
 
 def _free_port():
@@ -61,6 +59,7 @@ def _start_server(data_dir, base_url, port=None):
         return existing._minerva_port
 
     port = port or _free_port()
+    resolved_data_dir = str(Path(data_dir).expanduser().resolve())
     cmd = [
         sys.executable,
         "-m",
@@ -70,12 +69,21 @@ def _start_server(data_dir, base_url, port=None):
         "--port",
         str(port),
         "--data-dir",
-        str(Path(data_dir).expanduser().resolve()),
+        resolved_data_dir,
         "--base-url",
         base_url,
         "--notebook-mode",
     ]
-    process = subprocess.Popen(cmd)
+    # Real OS env vars must be set before the child's first `import
+    # minerva_analysis`, since __init__.py snapshots MINERVA_DATA_PATH /
+    # MINERVA_BASE_URL at import time -- the CLI flags above are consumed by
+    # server_cli.py too late relative to that import.
+    env = os.environ.copy()
+    env["MINERVA_DATA_PATH"] = resolved_data_dir
+    env["MINERVA_BASE_URL"] = base_url
+    env["MINERVA_NOTEBOOK_MODE"] = "1"
+    repo_root = Path(__file__).resolve().parent.parent
+    process = subprocess.Popen(cmd, cwd=repo_root, env=env)
     process._minerva_port = port
     _SERVERS[key] = process
     _wait_until_ready(port)

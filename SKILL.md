@@ -31,7 +31,7 @@ Top-level files:
 
 Python package:
 
-- `minerva_analysis/__init__.py`: creates the Flask app, configures `data_path`, SQLite path, package paths, base URL, notebook iframe headers, and imports routes/models.
+- `minerva_analysis/__init__.py`: creates the Flask app, configures `data_path`, SQLite path, package paths, base URL, notebook-mode flag, and imports routes/models. Does **not** set any iframe-specific headers (an `X-Frame-Options: SAMEORIGIN` header here used to block direct/local notebook iframe embedding entirely -- since fixed by removing it; see "Notebook Proxy Env-Var Propagation").
 - `minerva_analysis/server_cli.py`: notebook-friendly sidecar CLI, exposed as `minerva-analysis-server`.
 - `minerva_analysis/jupyter.py`: notebook display API and subprocess lifecycle for sidecar servers.
 - `minerva_analysis/proxy.py`: `jupyter-server-proxy` launcher entry point.
@@ -85,11 +85,24 @@ Tile and metadata flow:
 
 Notebook flow:
 
-- `MinervaViewer` starts `python -m minerva_analysis.server_cli` in a subprocess bound to `127.0.0.1`.
+- `MinervaViewer` starts `python -m minerva_analysis.server_cli` in a subprocess bound to `127.0.0.1`, with `cwd` pinned to the repo root (`Path(__file__).resolve().parent.parent` in `jupyter.py`) so package resolution can't be shadowed by a same-named directory in whatever cwd the caller happens to have (see "Known Sharp Edges").
 - Direct local notebooks use iframe URLs like `http://127.0.0.1:<port>/<datasource>`.
 - Remote/JupyterHub notebooks use proxy URLs like `<jupyter_base>/proxy/<port>/<datasource>`.
-- `MINERVA_BASE_URL` makes Flask templates and frontend requests base-url aware.
-- `MINERVA_NOTEBOOK_MODE=1` enables same-origin iframe-friendly headers.
+- `MINERVA_BASE_URL` makes Flask templates and frontend requests base-url aware (every frontend AJAX call goes through `minervaUrl()` in `passVariablesToFrontend.js`, which reads `window.MINERVA_BASE_URL`).
+- `MINERVA_NOTEBOOK_MODE=1` is read by `__init__.py` but currently has no header-setting behavior attached to it (see "Notebook Proxy Env-Var Propagation" below for why an earlier `X-Frame-Options: SAMEORIGIN` header tied to this flag was removed).
+- `MinervaViewer._default_data_dir()` resolves to the package's own `data/` folder (`Path(__file__).resolve().parent / "data"` in `jupyter.py`) when no `data_dir`/`MINERVA_DATA_PATH` is given -- deliberately *not* cwd-relative, since a notebook kernel's cwd can be anywhere (unlike `run.py`'s desktop-app convention of "run from the repo root", which is genuinely cwd-relative by design).
+
+### Notebook Proxy Env-Var Propagation (fixed; understand before touching `jupyter.py`/`proxy.py`/`server_cli.py`)
+
+`minerva_analysis/__init__.py` snapshots `MINERVA_BASE_URL`/`MINERVA_DATA_PATH`/`MINERVA_NOTEBOOK_MODE` from `os.environ` **once, at package-import time**. Both `python -m minerva_analysis.server_cli` and the `minerva-analysis-server` console script unavoidably import the parent `minerva_analysis` package (running that snapshot code) *before* `server_cli.py`'s own `main()` is even reachable -- so `main()`'s `os.environ["MINERVA_BASE_URL"] = args.base_url` (etc.) always ran too late and was silently a no-op. This broke both JupyterHub integration paths: `MinervaViewer(proxy=True)` and the `jupyter-server-proxy` entry point (`proxy.py`) would spawn a server that ignored the base URL and data directory they were configured with.
+
+Fix (confirmed via live testing, not just reasoning about import order):
+- `jupyter.py`'s `_start_server` passes `env=` directly to `subprocess.Popen`, setting the three vars as real OS-level env vars *before* the child process starts -- this sidesteps the snapshot entirely, since the child's first-ever `import minerva_analysis` then sees the correct values.
+- `proxy.py`'s `setup_minerva_analysis()` returns an `"environment"` dict in addition to the CLI flags in `"command"` -- `jupyter_server_proxy`'s own `SuperviseAndProxyHandler.ensure_process()` already does `server_env = os.environ.copy(); server_env.update(get_env()); create_subprocess_exec(..., env=server_env)` internally, so this is the same real-env-vars-at-spawn-time mechanism, verified directly against the installed `jupyter_server_proxy` package rather than assumed.
+- `server_cli.py` additionally does a post-import `app.config["MINERVA_BASE_URL"] = _clean_base_url(args.base_url)` override (mirroring the pre-existing `MINERVA_NOTEBOOK_MODE` override on the line above it), so a bare standalone `minerva-analysis-server --base-url X` invocation (no parent process to inject env for) also works. **Watch out**: `minerva_analysis/jupyter.py` defines its own, differently-behaved `_clean_base_url` (forces a trailing slash) -- always import the `__init__.py` one (strips it) for this override.
+- `MINERVA_DATA_PATH` has **no equivalent post-import fix** for bare standalone CLI usage: `data_path` drives `SQLALCHEMY_DATABASE_URI`/`config_json_path`, both baked in at Flask-SQLAlchemy init time before `main()` runs -- reassigning `app.config[...]` afterward can't retroactively repoint an already-constructed SQLAlchemy engine. This is an accepted residual gap -- only affects a user typing `minerva-analysis-server --data-dir X` directly in a shell, not `MinervaViewer`/`jupyter-server-proxy`, which both fix it via the real-env-at-spawn-time mechanism above.
+
+To verify a change in this area without a live JupyterHub: reproduce `jupyter_server_proxy`'s actual entry-point loader locally (`from jupyter_server_proxy.config import get_entrypoint_server_processes`), and separately point `MinervaViewer(proxy=True, ...)` at a scratch data dir with an obviously-distinct `config.json` marker key to prove `data_dir` isn't landing on the right value by coincidence.
 
 Datasource registration:
 
@@ -107,6 +120,7 @@ OpenSeadragon is a real, current npm dependency (`client/package.json`'s `opense
 - **`drawer: 'canvas'` is required** in the `viewer_config` passed to `OpenSeadragon(...)` in `imageViewer.js`. The per-tile WebGL compositing depends on the `tile-drawing` event's 2D `rendered` canvas context, which is only guaranteed under the canvas drawer — OpenSeadragon 6's newer WebGL Drawer has no documented custom-shader hook as of 6.1. Don't change this to `'webgl'` or `'auto'` without re-verifying that assumption against whatever OpenSeadragon version is current at the time.
 - **Vendored plugins**: only `canvas-overlay-hd.js` (lasso/centroid overlay, `OpenSeadragon.CanvasOverlayHd`) and `openseadragon-scalebar.js` (`viewer.scalebar(...)`, `scalebarInstance.getImageWithScalebarAsCanvas()` for the download-view export) remain in `client/external/openseadragon-bin-2.4.0/`. Both are unmaintained third-party single-file plugins with no npm equivalent (confirmed via `npm view` — 404), vendored in-repo rather than pulled from a live fork; both currently work against OpenSeadragon 6.x with zero patches. `openseadragon-svg-overlay.js`, `openseadragonrgb.js`, and `openseadragon-filtering.js` were deleted — confirmed zero references anywhere in the app, and the RGB one was actually crashing page load under 6.x (it patched a `Drawer` internal that no longer exists).
 - If a future OpenSeadragon upgrade breaks tile rendering, the debugging order is: (1) confirm `drawer: 'canvas'` is still in effect, (2) confirm `tile-loaded` still exposes `e.tileRequest.response` the same way, (3) check the two vendored plugins against whatever internals changed.
+- **Fullscreen**: OSD's own default toolbar "full page" button (`setFullPage()`) reparents just the `#openseadragon` element to `<body>` and resizes only that -- it never touches `#viewer_sidebar` (a DOM sibling inside the `#bodyDiv.viewer-shell` grid), so clicking it only fullscreens the canvas, not the sidebar. `imageViewer.js` intercepts OSD's `pre-full-page` event (`event.preventDefaultAction = true`) and instead toggles the native browser Fullscreen API on `#bodyDiv`, so the whole app shell goes fullscreen together. If OSD's fullscreen behavior needs revisiting, start there rather than re-enabling OSD's own button.
 
 ## Data Layer: Polars, Not Pandas
 
@@ -327,6 +341,7 @@ Frontend:
 - Missing segmentation tiles may show as browser console messages like `/generated/data/<dataset>/<label-channel>/<level>/<x>_<y>.png`. Confirm whether the tile is truly absent, computed lazily, or blocked by stale frontend cache.
 - A segmentation overlay that appears only after hard refresh suggests frontend cache/timing/base-url behavior, not necessarily bad source data.
 - `minerva_analysis/data/` is local runtime data. It may contain large datasets and should not be swept into commits.
+- Any bare directory literally named `minerva_analysis` sitting somewhere on `sys.path` (most commonly one accidentally created by running something with `MINERVA_DATA_PATH` unset from an unexpected cwd, since `__init__.py`'s cwd-relative fallback does `Path("minerva_analysis/data").mkdir(...)`) will silently shadow the real installed package as an empty PEP 420 namespace package for any `python -m minerva_analysis.<submodule>` invocation whose cwd resolves there first -- surfaces as `ImportError: cannot import name 'app' from 'minerva_analysis' (unknown location)`. Diagnose with `python -c "import minerva_analysis; print(minerva_analysis.__file__)"` from the suspect cwd (`None`/missing `__file__` confirms it); fix is deleting the stray directory (safe if it's untracked/gitignored -- check `git status` first) or avoiding that cwd. `jupyter.py`'s `_start_server` already pins `cwd` to the repo root for its own subprocess specifically to prevent this class of bug from recurring there.
 - Existing uncommitted changes may be user work. Do not revert them unless explicitly asked.
 
 ## Git And Release Notes

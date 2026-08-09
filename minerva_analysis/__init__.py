@@ -72,8 +72,11 @@ db = SQLAlchemy(app)
 
 @app.after_request
 def add_notebook_headers(response):
-    if app.config.get("MINERVA_NOTEBOOK_MODE"):
-        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    # X-Frame-Options: SAMEORIGIN would block the direct (non-proxy) notebook
+    # iframe flow, since the sidecar server (127.0.0.1:<port>) is always a
+    # different origin than the Jupyter page embedding it. The sidecar only
+    # binds to 127.0.0.1, so omitting the header does not expose it to the
+    # network.
     return response
 
 
