@@ -14,7 +14,16 @@ class ViewerSidebar {
         this.gateSlider = null;
         this.channelSlots = [];
         this.channelSlotSliders = new Map();
+        // Remembers a manually-set intensity range per marker name (not per slot), so
+        // switching a slot's marker away and back doesn't discard what the user tuned.
+        this.markerRangeOverrides = new Map();
+        this.colorPickers = new Map();
+        this.markerSelects = new Map();
+        this.gateMarkerSelect = null;
         this.gateMarkerChangeTimer = null;
+        this._saveChannelsTimer = null;
+        this._saveGatingTimer = null;
+        this._restoring = false;
         this.maxChannelSlots = 15;
         this.initialChannelSlots = 4;
         this.defaultColors = [
@@ -25,14 +34,40 @@ class ViewerSidebar {
         ];
     }
 
-    init(databaseDescription) {
+    async init(databaseDescription) {
         this.databaseDescription = databaseDescription;
         this.setupSidebarShell();
         this.populateGateSelect();
-        this.initChannelSlots();
         this.bindActions();
-        this.setGateMarker(this.columns[1] || this.columns[0], { enableSlot: false });
-        this.applyInitialChannels();
+
+        const maxLabel = document.getElementById("max-channels");
+        if (maxLabel) maxLabel.textContent = this.maxChannelSlots;
+
+        const [savedChannels, savedGating] = await Promise.all([
+            this.dataLayer.getSavedChannelList(),
+            this.dataLayer.getSavedGatingList(),
+        ]);
+
+        // Suppressed while restoring: applySavedChannels/applySavedGating reuse the same
+        // setters live edits use, which otherwise schedule an autosave on every call -
+        // turning "load from DB" into "load from DB, then immediately write back to DB".
+        this._restoring = true;
+        if (savedChannels && savedChannels.length) {
+            this.applySavedChannels(savedChannels);
+        } else {
+            this.initChannelSlots();
+            this.applyInitialChannels();
+        }
+
+        if (savedGating && savedGating.length) {
+            this.applySavedGating(savedGating);
+        } else {
+            this.setGateMarker(this.columns[1] || this.columns[0], { enableSlot: false });
+        }
+        this._restoring = false;
+
+        if (!(savedChannels && savedChannels.length)) this.persistChannelList();
+        if (!(savedGating && savedGating.length)) this.persistGatingList();
     }
 
     setupSidebarShell() {
@@ -53,15 +88,6 @@ class ViewerSidebar {
     }
 
     bindActions() {
-        const gateSelect = document.getElementById("gate_marker_select");
-        gateSelect.addEventListener("change", (event) => {
-            window.clearTimeout(this.gateMarkerChangeTimer);
-            const marker = event.target.value;
-            this.gateMarkerChangeTimer = window.setTimeout(() => {
-                this.setGateMarker(marker);
-            }, 0);
-        });
-
         const gateAuto = document.getElementById("gate_auto_button");
         gateAuto.addEventListener("click", async () => {
             gateAuto.disabled = true;
@@ -84,21 +110,31 @@ class ViewerSidebar {
     }
 
     populateGateSelect() {
-        const select = document.getElementById("gate_marker_select");
-        select.innerHTML = "";
+        const names = this.getGateMarkerNames();
+        const mount = document.getElementById("gate_marker_select");
+        if (!this.gateMarkerSelect) {
+            this.gateMarkerSelect = new SearchableSelect(mount, {
+                options: names,
+                value: this.gateMarker || "",
+                placeholder: "Search markers…",
+                onChange: (name) => {
+                    window.clearTimeout(this.gateMarkerChangeTimer);
+                    this.gateMarkerChangeTimer = window.setTimeout(() => {
+                        this.setGateMarker(name);
+                    }, 0);
+                },
+            });
+        } else {
+            this.gateMarkerSelect.setOptions(names);
+        }
+    }
+
+    getGateMarkerNames() {
         const names = [...this.columns];
         if (!names.includes("Area") && this.databaseDescription.Area) {
             names.push("Area");
         }
-        names.forEach((name) => {
-            if (!this.databaseDescription[this.dataLayer.getFullChannelName(name)]) {
-                return;
-            }
-            const option = document.createElement("option");
-            option.value = name;
-            option.textContent = name;
-            select.appendChild(option);
-        });
+        return names.filter((name) => this.databaseDescription[this.dataLayer.getFullChannelName(name)]);
     }
 
     initChannelSlots() {
@@ -114,6 +150,8 @@ class ViewerSidebar {
                 colorHex: color.hex,
                 enabled: slotIndex === 0 && Boolean(name),
                 visible: Boolean(name),
+                expanded: false,
+                sliderDirty: false,
                 range: this.getImageRange(name),
                 userColorChanged: false,
                 userRangeChanged: false,
@@ -133,6 +171,7 @@ class ViewerSidebar {
         row.classList.toggle("is-hidden", !slot.visible);
         row.classList.toggle("is-disabled", !slot.enabled);
         row.setAttribute("data-slot", slot.index);
+        row.style.setProperty("--slot-color", slot.colorHex);
 
         const top = document.createElement("div");
         top.classList.add("channel-slot-top");
@@ -140,6 +179,7 @@ class ViewerSidebar {
 
         const toggle = document.createElement("input");
         toggle.type = "checkbox";
+        toggle.classList.add("channel-toggle-switch");
         toggle.checked = slot.enabled;
         toggle.title = "Toggle channel";
         toggle.addEventListener("change", (event) => {
@@ -147,36 +187,33 @@ class ViewerSidebar {
         });
         top.appendChild(toggle);
 
-        const color = document.createElement("input");
-        color.type = "color";
-        color.value = slot.colorHex;
-        color.title = "Channel color";
-        color.classList.add("channel-color-input");
-        color.addEventListener("input", (event) => {
-            this.setSlotColor(slot.index, event.target.value, true);
+        const colorMount = document.createElement("div");
+        top.appendChild(colorMount);
+        const colorPicker = new ColorSwatchPicker(colorMount, {
+            value: slot.colorHex,
+            onChange: (hex) => this.setSlotColor(slot.index, hex, true),
         });
-        top.appendChild(color);
+        this.colorPickers.set(slot.index, colorPicker);
 
-        const select = document.createElement("select");
-        select.classList.add("sidebar-select");
-        this.columns.forEach((name) => {
-            const option = document.createElement("option");
-            option.value = name;
-            option.textContent = name;
-            select.appendChild(option);
+        const comboMount = document.createElement("div");
+        top.appendChild(comboMount);
+        const markerSelect = new SearchableSelect(comboMount, {
+            options: this.columns,
+            value: slot.name,
+            placeholder: "Select marker…",
+            describeOption: (name) => this.describeMarkerOption(name, slot.index),
+            onChange: (name) => this.setSlotMarker(slot.index, name, { keepColor: true, enable: true }),
         });
-        select.value = slot.name;
-        select.addEventListener("change", (event) => {
-            this.setSlotMarker(slot.index, event.target.value, { keepColor: true, enable: true });
-        });
-        top.appendChild(select);
+        this.markerSelects.set(slot.index, markerSelect);
 
-        const auto = document.createElement("button");
-        auto.type = "button";
-        auto.classList.add("slot-auto-button");
-        auto.textContent = "Auto";
-        auto.addEventListener("click", () => this.autoChannel(slot.index, { force: true }));
-        top.appendChild(auto);
+        const expandToggle = document.createElement("button");
+        expandToggle.type = "button";
+        expandToggle.classList.add("channel-slot-expand-toggle");
+        expandToggle.classList.toggle("is-expanded", Boolean(slot.expanded));
+        expandToggle.title = "Show threshold range";
+        expandToggle.innerHTML = '<span class="fas fa-chevron-down"></span>';
+        expandToggle.addEventListener("click", () => this.toggleSlotExpanded(slot.index));
+        top.appendChild(expandToggle);
 
         const remove = document.createElement("button");
         remove.type = "button";
@@ -186,15 +223,34 @@ class ViewerSidebar {
         remove.addEventListener("click", () => this.removeChannelSlot(slot.index));
         top.appendChild(remove);
 
+        const detail = document.createElement("div");
+        detail.classList.add("channel-slot-detail");
+        detail.classList.toggle("is-expanded", Boolean(slot.expanded));
+
+        const detailHeader = document.createElement("div");
+        detailHeader.classList.add("slot-detail-header");
+
         const values = document.createElement("div");
         values.classList.add("range-readout", "slot-range-readout");
         values.innerHTML = `<span id="channel_slot_min_${slot.index}">0.00</span><span id="channel_slot_max_${slot.index}">0.00</span>`;
-        row.appendChild(values);
+        detailHeader.appendChild(values);
+
+        const auto = document.createElement("button");
+        auto.type = "button";
+        auto.classList.add("slot-auto-button");
+        auto.title = "Auto-set threshold range from data";
+        auto.textContent = "Auto";
+        auto.addEventListener("click", () => this.autoChannel(slot.index, { force: true }));
+        detailHeader.appendChild(auto);
+
+        detail.appendChild(detailHeader);
 
         const slider = document.createElement("div");
         slider.classList.add("sidebar-slider");
         slider.setAttribute("id", `channel_slot_slider_${slot.index}`);
-        row.appendChild(slider);
+        detail.appendChild(slider);
+
+        row.appendChild(detail);
 
         return row;
     }
@@ -213,12 +269,16 @@ class ViewerSidebar {
         if (name === this.gateMarker && !options.force) return;
         const enableSlot = options.enableSlot !== false;
         this.gateMarker = name;
-        const select = document.getElementById("gate_marker_select");
-        select.value = name;
+        if (this.gateMarkerSelect) {
+            this.gateMarkerSelect.setValue(name);
+        }
         this.ensureGateSelection(name);
         this.redrawGateSlider();
         this.drawGateDistribution();
-        this.setSlotMarker(1, name, { keepColor: true, enable: enableSlot, reveal: enableSlot });
+        if (options.syncSlot !== false) {
+            this.setSlotMarker(1, name, { keepColor: true, enable: enableSlot, reveal: enableSlot });
+        }
+        this.scheduleSaveGating();
     }
 
     ensureGateSelection(name) {
@@ -269,8 +329,11 @@ class ViewerSidebar {
         this.gatingList.selections = {};
         this.gatingList.selections[fullName] = normalized;
         this.updateGateReadout(normalized);
-        this.drawGateDistribution();
+        this.updateGateThresholdLines(normalized);
         this.eventHandler.trigger(eventName, this.gatingList.selections);
+        if (eventName === CSVGatingList.events.GATING_BRUSH_END) {
+            this.scheduleSaveGating();
+        }
     }
 
     async autoGate() {
@@ -294,6 +357,7 @@ class ViewerSidebar {
     drawGateDistribution() {
         const target = document.getElementById("gate_distribution_plot");
         target.innerHTML = "";
+        this.gateDistributionScale = null;
         if (!this.gateMarker) return;
         const fullName = this.dataLayer.getFullChannelName(this.gateMarker);
         const desc = this.databaseDescription[fullName];
@@ -325,18 +389,38 @@ class ViewerSidebar {
             .datum(histogram)
             .attr("class", "sidebar-distribution-line")
             .attr("d", line);
-        values.forEach((value) => {
-            g.append("line")
-                .attr("class", "gate-threshold-line")
-                .attr("x1", xScale(value))
-                .attr("x2", xScale(value))
-                .attr("y1", 0)
-                .attr("y2", innerHeight);
-        });
+        g.append("g")
+            .attr("class", "gate-threshold-lines")
+            .selectAll("line")
+            .data(values)
+            .enter()
+            .append("line")
+            .attr("class", "gate-threshold-line")
+            .attr("x1", (value) => xScale(value))
+            .attr("x2", (value) => xScale(value))
+            .attr("y1", 0)
+            .attr("y2", innerHeight);
         g.append("g")
             .attr("class", "distribution-axis")
             .attr("transform", `translate(0,${innerHeight})`)
             .call(d3.axisBottom(xScale).ticks(3).tickFormat(d3.format(".2f")));
+
+        this.gateDistributionScale = xScale;
+    }
+
+    // Cheap per-tick update during a drag: reposition the existing threshold lines instead of
+    // tearing down and rebuilding the whole histogram/axis (which was the source of drag lag).
+    updateGateThresholdLines(values) {
+        if (!this.gateDistributionScale) {
+            this.drawGateDistribution();
+            return;
+        }
+        const xScale = this.gateDistributionScale;
+        d3.select("#gate_distribution_plot")
+            .selectAll(".gate-threshold-line")
+            .data(values)
+            .attr("x1", (value) => xScale(value))
+            .attr("x2", (value) => xScale(value));
     }
 
     setSlotMarker(slotIndex, name, options = {}) {
@@ -351,11 +435,20 @@ class ViewerSidebar {
         }
         this.disableDuplicateChannels(name, slotIndex);
         slot.name = name;
-        slot.range = this.getImageRange(name);
         if (markerChanged) {
-            slot.userRangeChanged = false;
-            slot.autoLeveled = false;
+            const override = this.markerRangeOverrides.get(name);
+            if (override) {
+                slot.range = [...override];
+                slot.userRangeChanged = true;
+                slot.autoLeveled = true;
+            } else {
+                slot.range = this.getImageRange(name);
+                slot.userRangeChanged = false;
+                slot.autoLeveled = false;
+            }
             slot.autoLeveling = false;
+            slot.expanded = true;
+            slot.sliderDirty = true;
         }
         if (!options.keepColor) {
             this.setSlotColor(slotIndex, this.getDefaultColor(slotIndex).hex, false);
@@ -367,12 +460,13 @@ class ViewerSidebar {
             slot.visible = true;
         }
         this.syncSlotDom(slot);
-        this.redrawChannelSlider(slot);
+        this.applySlotExpansion(slot);
         if (slot.enabled) {
             this.activateChannel(slot);
             this.autoLevelChannelIfNeeded(slot);
         }
         this.updateSelectedCount();
+        this.scheduleSaveChannels();
     }
 
     setSlotEnabled(slotIndex, enabled) {
@@ -392,6 +486,7 @@ class ViewerSidebar {
         }
         this.syncSlotDom(slot);
         this.updateSelectedCount();
+        this.scheduleSaveChannels();
     }
 
     setSlotColor(slotIndex, hex, userColorChanged) {
@@ -408,6 +503,7 @@ class ViewerSidebar {
                 color: d3.rgb(slot.color.r, slot.color.g, slot.color.b),
             });
         }
+        this.scheduleSaveChannels();
     }
 
     activateChannel(slot) {
@@ -459,12 +555,19 @@ class ViewerSidebar {
     }
 
     redrawChannelSliders() {
-        this.channelSlots.filter((slot) => slot.visible).forEach((slot) => this.redrawChannelSlider(slot));
+        this.channelSlots.filter((slot) => slot.visible && slot.expanded).forEach((slot) => this.redrawChannelSlider(slot));
     }
 
     redrawChannelSlider(slot) {
         if (!slot || !slot.name) return;
+        this.updateSlotReadout(slot);
+        if (!slot.expanded) {
+            slot.sliderDirty = true;
+            return;
+        }
+        slot.sliderDirty = false;
         const target = document.getElementById(`channel_slot_slider_${slot.index}`);
+        if (!target) return;
         target.innerHTML = "";
         const range = this.getImageRange(slot.name);
         const width = Math.max(180, target.getBoundingClientRect().width - 16);
@@ -477,7 +580,8 @@ class ViewerSidebar {
             .default([Math.max(slot.range[0], 1), Math.max(slot.range[1], 2)])
             .fill("#38bdf8")
             .handle(d3.symbol().type(d3.symbolCircle).size(120))
-            .on("onchange", (value) => this.setSlotRange(slot.index, value, true));
+            .on("onchange", (value) => this.setSlotRange(slot.index, value, true))
+            .on("end", () => this.scheduleSaveChannels());
 
         this.channelSlotSliders.set(slot.index, slider);
         d3.select(target)
@@ -487,7 +591,32 @@ class ViewerSidebar {
             .append("g")
             .attr("transform", "translate(8,18)")
             .call(slider);
-        this.updateSlotReadout(slot);
+    }
+
+    toggleSlotExpanded(slotIndex) {
+        const slot = this.channelSlots[slotIndex];
+        if (!slot) return;
+        slot.expanded = !slot.expanded;
+        this.applySlotExpansion(slot);
+    }
+
+    applySlotExpansion(slot) {
+        const row = document.querySelector(`.channel-slot[data-slot="${slot.index}"]`);
+        if (!row) return;
+        const detail = row.querySelector(".channel-slot-detail");
+        const toggle = row.querySelector(".channel-slot-expand-toggle");
+        if (detail) detail.classList.toggle("is-expanded", Boolean(slot.expanded));
+        if (toggle) toggle.classList.toggle("is-expanded", Boolean(slot.expanded));
+        if (slot.expanded && (slot.sliderDirty || !this.channelSlotSliders.has(slot.index))) {
+            this.redrawChannelSlider(slot);
+        }
+    }
+
+    describeMarkerOption(name, currentSlotIndex) {
+        const activeElsewhere = this.channelSlots.some(
+            (slot) => slot.index !== currentSlotIndex && slot.enabled && slot.name === name
+        );
+        return activeElsewhere ? "active elsewhere" : "";
     }
 
     setSlotRange(slotIndex, values, userChanged = false) {
@@ -496,6 +625,9 @@ class ViewerSidebar {
         slot.range = this.normalizeRange(values, true);
         if (userChanged) {
             slot.userRangeChanged = true;
+            if (slot.name) {
+                this.markerRangeOverrides.set(slot.name, [...slot.range]);
+            }
         }
         this.channelList.image_channels[slot.name] = slot.range;
         this.updateSlotReadout(slot);
@@ -567,6 +699,8 @@ class ViewerSidebar {
             colorHex: color.hex,
             enabled: false,
             visible: true,
+            expanded: false,
+            sliderDirty: false,
             range: this.getImageRange(name),
             userColorChanged: false,
             userRangeChanged: false,
@@ -589,6 +723,8 @@ class ViewerSidebar {
         slot.range = this.getImageRange("");
         slot.enabled = false;
         slot.visible = false;
+        slot.expanded = false;
+        slot.sliderDirty = false;
         slot.color = color.rgb;
         slot.colorHex = color.hex;
         slot.userColorChanged = false;
@@ -597,7 +733,9 @@ class ViewerSidebar {
         slot.autoLeveling = false;
         this.channelSlotSliders.delete(slotIndex);
         this.syncSlotDom(slot);
+        this.applySlotExpansion(slot);
         this.updateSelectedCount();
+        this.scheduleSaveChannels();
     }
 
     syncSlotDom(slot) {
@@ -605,13 +743,129 @@ class ViewerSidebar {
         if (!row) return;
         row.classList.toggle("is-hidden", !slot.visible);
         row.classList.toggle("is-disabled", !slot.enabled);
-        const checkbox = row.querySelector('input[type="checkbox"]');
-        const color = row.querySelector('input[type="color"]');
-        const select = row.querySelector("select");
-        checkbox.checked = slot.enabled;
-        color.value = slot.colorHex;
-        select.value = slot.name;
+        row.style.setProperty("--slot-color", slot.colorHex);
+        const toggle = row.querySelector(".channel-toggle-switch");
+        if (toggle) toggle.checked = slot.enabled;
+        const colorPicker = this.colorPickers.get(slot.index);
+        if (colorPicker) colorPicker.setValue(slot.colorHex);
+        const markerSelect = this.markerSelects.get(slot.index);
+        if (markerSelect) markerSelect.setValue(slot.name);
         this.updateSlotReadout(slot);
+    }
+
+    applySavedGating(rows) {
+        let activeRow = null;
+        rows.forEach((row) => {
+            if (!row || !row.channel || row.channel === "Lasso") return;
+            this.gatingList.gating_channels[row.channel] = [row.gate_start, row.gate_end];
+            if (row.gate_active) {
+                activeRow = row;
+            }
+        });
+        const marker = activeRow
+            ? this.dataLayer.getShortChannelName(activeRow.channel)
+            : (this.columns[1] || this.columns[0]);
+        // syncSlot:false - applySavedChannels already placed every active channel (including
+        // this one, if it was active) in its correct restored slot; letting setGateMarker's
+        // normal slot-1 mirroring run here would clobber whatever channel actually belongs there.
+        this.setGateMarker(marker, { force: true, syncSlot: false });
+    }
+
+    applySavedChannels(rows) {
+        const activeRows = rows.filter((row) => row && row.channel_active);
+        const slotList = document.getElementById("channel_slot_list");
+        slotList.innerHTML = "";
+        this.channelSlots = [];
+        this.channelSlotSliders.clear();
+        this.colorPickers.clear();
+        this.markerSelects.clear();
+
+        const count = Math.min(Math.max(activeRows.length, this.initialChannelSlots), this.maxChannelSlots);
+        // Slots beyond the active rows aren't assigned by a saved row at all, but they should
+        // still show a marker (off) rather than sit empty, matching the pre-restore default look.
+        const usedNames = new Set(activeRows.slice(0, count).map((row) => row.channel));
+        const fallbackNames = this.columns.filter((name) => !usedNames.has(name));
+        let fallbackIdx = 0;
+        for (let i = 0; i < count; i++) {
+            const color = this.getDefaultColor(i);
+            const name = i < activeRows.length ? "" : (fallbackNames[fallbackIdx++] || "");
+            const slot = {
+                index: i,
+                name,
+                color: color.rgb,
+                colorHex: color.hex,
+                enabled: false,
+                visible: true,
+                expanded: false,
+                sliderDirty: false,
+                range: this.getImageRange(name),
+                userColorChanged: false,
+                userRangeChanged: false,
+                autoLeveled: false,
+                autoLeveling: false,
+            };
+            this.channelSlots.push(slot);
+            slotList.appendChild(this.createChannelSlot(slot));
+        }
+
+        activeRows.slice(0, count).forEach((row, i) => {
+            const slot = this.channelSlots[i];
+            if (!slot) return;
+            this.setSlotMarker(slot.index, row.channel, { keepColor: true, enable: true, force: true });
+            this.setSlotColor(slot.index, this.rgbToHex(row.r, row.g, row.b), true);
+            this.setSlotRange(slot.index, [row.start, row.end], true);
+            slot.expanded = false;
+            this.applySlotExpansion(slot);
+        });
+        this.updateSelectedCount();
+    }
+
+    rgbToHex(r, g, b) {
+        const toHex = (value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0");
+        return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    }
+
+    persistChannelList() {
+        const listChannels = {};
+        this.columns.forEach((name) => {
+            listChannels[name] = this.channelList.image_channels[name] || this.getImageRange(name);
+        });
+        const activeChannels = {};
+        const listColors = {};
+        const listRanges = {};
+        this.channelSlots.forEach((slot) => {
+            if (!slot.name || !slot.enabled) return;
+            const fullName = this.dataLayer.getFullChannelName(slot.name);
+            const idx = imageChannels[fullName];
+            if (idx === undefined) return;
+            activeChannels[idx] = true;
+            listColors[idx] = { color: { ...slot.color, opacity: 1 } };
+            listRanges[idx] = this.toImageConnectorRange(slot.range);
+            listChannels[slot.name] = slot.range;
+        });
+        return this.dataLayer.saveChannelList(imageChannelsIdx, activeChannels, listColors, listRanges, listChannels);
+    }
+
+    persistGatingList() {
+        return this.dataLayer.saveGatingList(this.gatingList.gating_channels, this.gatingList.selections, {});
+    }
+
+    scheduleSaveChannels() {
+        if (this._restoring) return;
+        window.clearTimeout(this._saveChannelsTimer);
+        this._saveChannelsTimer = window.setTimeout(() => {
+            // Chained (not just debounced): a slow/out-of-order response from an earlier
+            // save could otherwise land after a newer one and silently overwrite it.
+            this._channelSaveChain = (this._channelSaveChain || Promise.resolve()).then(() => this.persistChannelList());
+        }, 400);
+    }
+
+    scheduleSaveGating() {
+        if (this._restoring) return;
+        window.clearTimeout(this._saveGatingTimer);
+        this._saveGatingTimer = window.setTimeout(() => {
+            this._gatingSaveChain = (this._gatingSaveChain || Promise.resolve()).then(() => this.persistGatingList());
+        }, 400);
     }
 
     updateSelectedCount() {

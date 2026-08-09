@@ -196,7 +196,6 @@ async function init(config) {
         }
     };
     let segmentationGateRequest = 0;
-    let segmentationGateTimer = null;
     const updateSegmentationForGate = async (showSpinner = true) => {
         if (!seaDragonViewer.viewerManagerVMain?.sel_outlines) return;
         const requestId = ++segmentationGateRequest;
@@ -205,28 +204,38 @@ async function init(config) {
             seaDragonViewer.forceRepaint();
         }
     };
-    const scheduleSegmentationForGate = () => {
+    // Runs on every move tick, as fast as the network+render round trip allows, rather than
+    // waiting on a fixed interval: if a request is still in flight when the next tick arrives,
+    // it's marked pending and replayed immediately (with the latest gate values) as soon as the
+    // in-flight one finishes, so the mask keeps following the handle continuously while dragging.
+    let segmentationGateRunning = false;
+    let segmentationGatePending = false;
+    const runSegmentationGate = async (showSpinner) => {
         if (!seaDragonViewer.viewerManagerVMain?.sel_outlines) return;
-        if (segmentationGateTimer) {
-            window.clearTimeout(segmentationGateTimer);
+        if (segmentationGateRunning) {
+            segmentationGatePending = true;
+            return;
         }
-        segmentationGateTimer = window.setTimeout(() => {
-            updateSegmentationForGate(false);
-        }, 120);
+        segmentationGateRunning = true;
+        try {
+            await updateSegmentationForGate(showSpinner);
+            while (segmentationGatePending) {
+                segmentationGatePending = false;
+                await updateSegmentationForGate(false);
+            }
+        } finally {
+            segmentationGateRunning = false;
+        }
     };
     const handler = () => updateSeaDragonSelection();
     eventHandler.bind(CSVGatingList.events.GATING_BRUSH_END, () => {
-        if (segmentationGateTimer) {
-            window.clearTimeout(segmentationGateTimer);
-            segmentationGateTimer = null;
-        }
         handler();
         updateCentroidsForGate();
-        updateSegmentationForGate();
+        runSegmentationGate(true);
     });
     eventHandler.bind(CSVGatingList.events.GATING_BRUSH_MOVE, () => {
         handler();
-        scheduleSegmentationForGate();
+        runSegmentationGate(false);
     });
 
     eventHandler.bind(ChannelList.events.BRUSH_MOVE, (d) => {
@@ -250,15 +259,9 @@ async function init(config) {
     };
     eventHandler.bind(CSVGatingList.events.RESET_GATINGLIST, reset_gatinglist);
 
-    const add_scalebar = () => {
-        seaDragonViewer.addScaleBar();
-        seaDragonViewer.forceRepaint();
-    };
-    eventHandler.bind(ImageViewer.events.addScaleBar, add_scalebar);
-
     if (typeof ViewerSidebar !== "undefined" && document.getElementById("viewer_sidebar")) {
         const viewerSidebar = new ViewerSidebar(config, columns, dataLayer, eventHandler, channelList, csv_gatingList);
         __minervaAnalysis.viewerSidebar = viewerSidebar;
-        viewerSidebar.init(dd);
+        await viewerSidebar.init(dd);
     }
 }

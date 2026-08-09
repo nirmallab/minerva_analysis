@@ -728,6 +728,8 @@ def save_gating_list(datasource_name, gates, channels, lassos):
 
 def get_saved_gating_list(datasource_name):
     gating_list = database_model.get(database_model.GatingList, datasource=datasource_name)
+    if gating_list is None:
+        return None
     return pickle.loads(gating_list.cells)
 
 
@@ -801,6 +803,8 @@ def save_channel_list(datasource_name, map_channels, active_channels, list_color
 
 def get_saved_channel_list(datasource_name):
     channel_list = database_model.get(database_model.ChannelList, datasource=datasource_name)
+    if channel_list is None:
+        return None
     return pickle.loads(channel_list.cells)
 
 

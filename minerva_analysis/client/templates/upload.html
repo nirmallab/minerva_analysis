@@ -20,7 +20,7 @@
                             <label for="name" >Dataset Name:</label>
                         </div>
                         <div class="col-9">
-                            <input type="text" class="form-control" id="name" name="name" required>
+                            <input type="text" class="form-control" id="name" name="name" oninput="markDatasetNameEdited()" required>
                             <div class="valid-feedback">Valid.</div>
                             <div class="invalid-feedback">
                                 Please name the dataset.
@@ -34,7 +34,7 @@
                                 <label for="channel_file">Image File Path:</label>
                             </div>
                             <div class="col-9">
-                                <input type="text" id="channel_file" class="form-control" name="channel_file" onkeyup="checkFileExistence(this)" required>
+                                <input type="text" id="channel_file" class="form-control" name="channel_file" onkeyup="checkFileExistence(this); suggestDatasetName(this);" required>
                                 <div class="valid-feedback">Valid.</div>
                                 <div class="invalid-feedback">
                                     Please provide a valid path to the channel image file.

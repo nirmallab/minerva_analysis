@@ -23,14 +23,8 @@
 
             <section class="sidebar-section" id="gate_marker_section">
                 <div class="section-heading">
-                    <h2>Gate Marker</h2>
+                    <h2><span class="fas fa-sliders section-heading-icon"></span>Gate Marker</h2>
                     <div class="section-actions">
-                        <button id="gating_upload_icon_db" class="icon-button" title="Load gating from database" type="button">
-                            <span class="fas fa-upload"></span>
-                        </button>
-                        <button id="gating_download_icon_db" class="icon-button" title="Save gating to database" type="button">
-                            <span class="fas fa-download"></span>
-                        </button>
                         <button id="gating_upload_icon" class="icon-button" title="Load gating from CSV" type="button">
                             <span class="fas fa-file-upload"></span>
                         </button>
@@ -40,19 +34,19 @@
                     </div>
                 </div>
                 <div id="gating_download_panel">
-                    <a id="gating_exit">&#10006;</a>
+                    <a id="gating_exit"><span class="fas fa-xmark"></span></a>
                     <label>Download gated channel ranges:
                         <span class="download_flex">
                             <input id="download_input1" type="text" autocomplete="false" spellcheck="false"
                                    value="{{ data.datasource }}_gated_channel_ranges.csv">
-                            <a id="download_gated_channel_ranges" class="download_button">&#8679;</a>
+                            <a id="download_gated_channel_ranges" class="download_button"><span class="fas fa-arrow-up-from-bracket"></span></a>
                         </span>
                     </label>
                     <label>Download gated cell encodings:
                         <span class="download_flex">
                             <input id="download_input2" type="text" autocomplete="false" spellcheck="false"
                                    value="{{ data.datasource }}_gated_cell_encodings.csv">
-                            <a id="download_gated_cell_encodings" class="download_button">&#8679;</a>
+                            <a id="download_gated_cell_encodings" class="download_button"><span class="fas fa-arrow-up-from-bracket"></span></a>
                         </span>
                     </label>
                     <label>Cell Encoding:
@@ -66,8 +60,8 @@
                     <input id="gating-upload-from-arrow" class="hidden" type="file">
                     <input type="hidden" id="upload-arrow-datasource" name="upload-arrow-datasource">
                 </form>
-                <label class="control-label" for="gate_marker_select">Marker</label>
-                <select id="gate_marker_select" class="sidebar-select"></select>
+                <label class="control-label">Marker</label>
+                <div id="gate_marker_select" class="marker-combobox-mount"></div>
                 <div class="range-readout">
                     <span id="gate_min_value">0.00</span>
                     <span id="gate_max_value">0.00</span>
@@ -79,14 +73,8 @@
 
             <section class="sidebar-section" id="image_channel_section">
                 <div class="section-heading">
-                    <h2>Image Channels</h2>
+                    <h2><span class="fas fa-layer-group section-heading-icon"></span>Image Channels</h2>
                     <div class="section-actions">
-                        <button id="channels_upload_icon_db" class="icon-button" title="Load channels from database" type="button">
-                            <span class="fas fa-upload"></span>
-                        </button>
-                        <button id="channels_download_icon_db" class="icon-button" title="Save channels to database" type="button">
-                            <span class="fas fa-download"></span>
-                        </button>
                         <button id="channels_upload_icon" class="icon-button" title="Load channels from CSV" type="button">
                             <span class="fas fa-file-upload"></span>
                         </button>
@@ -102,6 +90,7 @@
                 <div class="selected-count">
                     <span id="num-selected-channels">0</span>
                     <span>active</span>
+                    <span class="selected-count-max">· <span id="max-channels">15</span> max</span>
                 </div>
                 <div id="channel_slot_list" class="channel-slot-list"></div>
                 <button id="add_channel_button" class="sidebar-action secondary" type="button">
@@ -112,11 +101,7 @@
 
             <section class="sidebar-section compact">
                 <div class="section-heading">
-                    <h2>Display</h2>
-                </div>
-                <div class="toggle-row">
-                    <label for="controls_scalebar">Scalebar</label>
-                    <input id="controls_scalebar" type="checkbox" checked>
+                    <h2><span class="fas fa-eye section-heading-icon"></span>Display</h2>
                 </div>
                 <div id="gating_controls_panel">
                     <label>Outlines

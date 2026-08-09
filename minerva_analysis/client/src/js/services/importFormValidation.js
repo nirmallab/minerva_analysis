@@ -21,6 +21,27 @@
         })
 })()
 
+//DATASET NAME AUTO-SUGGESTION FROM IMAGE FILE PATH
+let datasetNameManuallyEdited = false;
+
+function markDatasetNameEdited() {
+    datasetNameManuallyEdited = true;
+}
+
+function deriveDatasetName(path) {
+    if (!path) return "";
+    const base = path.split(/[\\/]/).pop() || "";
+    return base.replace(/\.(ome\.tiff|ome\.tif|ome\.zarr|tiff|tif|svs|zarr|png|qptiff)$/i, "");
+}
+
+function suggestDatasetName(caller) {
+    if (datasetNameManuallyEdited) return;
+    const nameField = document.getElementById("name");
+    if (!nameField) return;
+    const suggested = deriveDatasetName(caller && caller.value);
+    if (suggested) nameField.value = suggested;
+}
+
 //add listener
 d3.select("#import_type").on("change", update);
 

@@ -218,11 +218,6 @@ class CSVGatingList {
             }
         }
 
-        let arrow_db = document.getElementById('gating_upload_icon_db')
-        arrow_db.onclick = async () => {
-            await this.applyGates('db')
-        }
-
 
         // Adding dropzone for CSV_Gating_List
         let parent = document.getElementById('csv_gating_list');
@@ -429,7 +424,6 @@ class CSVGatingList {
     addDownloadEvents() {
 
         // Els
-        const gating_download_icon_db = document.querySelector('#gating_download_icon_db');
         const gating_download_icon = document.querySelector('#gating_download_icon');
         const gating_download_panel = document.querySelector('#gating_download_panel');
         const gating_exit = document.querySelector('#gating_exit');
@@ -441,11 +435,6 @@ class CSVGatingList {
         const gating_controls_centroids = document.querySelector('#gating_controls_centroids')
 
         // Events ::
-
-        gating_download_icon_db.addEventListener('click', () => {
-            this.dataLayer.saveGatingList(this.gating_channels, this.selections, this.seaDragonViewer.list_lassos);
-            alert("Saved Gating to Database");
-        })
 
         // Open / close download panel
         gating_download_icon.addEventListener('click', () => {

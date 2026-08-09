@@ -238,11 +238,6 @@ class ChannelList {
 
         });
 
-        let arrow_db = document.getElementById('channels_upload_icon_db')
-        arrow_db.onclick = async () => {
-            await this.applyChannels('db');
-        }
-
         let arrow = document.getElementById('channels_upload_icon')
         arrow.onclick = function () {
             let elem = document.getElementById('channels-upload-from-arrow');
@@ -365,17 +360,6 @@ class ChannelList {
             );
         });
 
-        const channels_download_icon_db = document.querySelector('#channels_download_icon_db');
-        channels_download_icon_db.addEventListener('click', () => {
-            this.dataLayer.saveChannelList(
-                imageChannelsIdx,
-                this.currentChannels,
-                this.colorConnector,
-                this.rangeConnector,
-                this.image_channels
-            );
-            alert("Saved Channels from Database");
-        });
     }
 
 

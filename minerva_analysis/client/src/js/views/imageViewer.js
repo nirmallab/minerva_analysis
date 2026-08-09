@@ -538,13 +538,6 @@ class ImageViewer {
         });
         this.styleScaleBar();
 
-        // Add listener for scalebar
-        const controls_scalebar = document.querySelector("#controls_scalebar");
-        controls_scalebar.addEventListener("change", (e) => {
-            this.show_scalebar = e.target.checked;
-            this.eventHandler.trigger(ImageViewer.events.addScaleBar);
-        });
-
         // Add event mouse handler (cell selection)
         this.viewer.addHandler("canvas-nonprimary-press", (e) => {
             // Right click (cell selection)
@@ -1989,8 +1982,7 @@ class ImageViewer {
 // Static vars
 ImageViewer.events = {
     imageClickedMultiSel: "image_clicked_multi_selection",
-    renderingMode: "renderingMode",
-    addScaleBar: "addScaleBar"
+    renderingMode: "renderingMode"
 };
 
 /**
