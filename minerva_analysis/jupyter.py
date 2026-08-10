@@ -9,7 +9,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-from minerva_analysis.datasource import register_datasource
+from minerva_analysis.datasource import register_datasource, register_anndata_datasource
 
 
 _SERVERS = {}
@@ -146,6 +146,54 @@ class MinervaViewer:
             y=y,
             id_column=id_column,
             celltype_column=celltype_column,
+            channel_names=channel_names,
+            copy=copy,
+            data_dir=resolved_data_dir,
+        )
+        return cls(datasource=name, data_dir=resolved_data_dir, **viewer_kwargs)
+
+    @classmethod
+    def from_anndata(
+        cls,
+        name,
+        image,
+        features=None,
+        adata=None,
+        segmentation=None,
+        coordinate_source=None,
+        obsm_key=None,
+        x=None,
+        y=None,
+        feature_source="X",
+        layer=None,
+        feature_obs_columns=None,
+        obs_id_field=None,
+        celltype_column=None,
+        subset_by=None,
+        subset_value=None,
+        channel_names=None,
+        copy=False,
+        data_dir=None,
+        **viewer_kwargs,
+    ):
+        resolved_data_dir = Path(data_dir or os.environ.get("MINERVA_DATA_PATH", _default_data_dir())).expanduser().resolve()
+        register_anndata_datasource(
+            name=name,
+            image=image,
+            features=features,
+            adata=adata,
+            segmentation=segmentation,
+            coordinate_source=coordinate_source,
+            obsm_key=obsm_key,
+            x=x,
+            y=y,
+            feature_source=feature_source,
+            layer=layer,
+            feature_obs_columns=feature_obs_columns,
+            obs_id_field=obs_id_field,
+            celltype_column=celltype_column,
+            subset_by=subset_by,
+            subset_value=subset_value,
             channel_names=channel_names,
             copy=copy,
             data_dir=resolved_data_dir,

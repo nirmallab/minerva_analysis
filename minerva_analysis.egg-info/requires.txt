@@ -1,3 +1,4 @@
+anndata>=0.10
 appdirs
 Flask>=3.1
 Flask-SQLAlchemy>=3.1
@@ -9,8 +10,8 @@ numpy>=2.0
 ome-types>=0.6.3
 opencv-python>=4.12
 orjson>=3.11
-pandas>=3.0
 Pillow>=10.4
+polars>=1.43
 pydantic<2.14,>=2.13
 scikit-image
 scikit-learn>=1.9

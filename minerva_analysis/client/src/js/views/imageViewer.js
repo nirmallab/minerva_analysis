@@ -66,7 +66,6 @@ class ImageViewer {
         // OSD plugins
         this.show_scalebar = true;
         this.show_centroids = false;
-        this.force_centroids = false;
 
         // Transfer function constant
         this.numTFBins = 1024;
@@ -1367,20 +1366,24 @@ class ImageViewer {
     }
 
     async updateCentroidFallback(isFallback) {
-        this.force_centroids = isFallback;
+        // Only ever called with true (turn centroids on as a one-time default/
+        // fallback, e.g. no segmentation registered or outlines failed to load).
+        // Routes through updateCentroidVisibility so show_centroids and the
+        // checkbox's checked state agree from the start -- previously this set
+        // a separate force_centroids flag that shouldDrawCentroids() OR'd in
+        // permanently, so unchecking the box afterward couldn't actually turn
+        // centroids off again.
         const checkbox = document.querySelector("#gating_controls_centroids");
         if (checkbox && isFallback) {
             checkbox.checked = true;
         }
         if (isFallback) {
-            await this.ensureCentroidsReady(true);
-            this.scheduleCentroidTileUpdate(0, true);
+            await this.updateCentroidVisibility(true);
         }
-        this.refreshCentroidOverlay();
     }
 
     shouldDrawCentroids() {
-        return this.show_centroids || this.force_centroids || this.noLabel;
+        return this.show_centroids;
     }
 
     updateCentroidIds() {

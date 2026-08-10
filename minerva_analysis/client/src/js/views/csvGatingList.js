@@ -94,8 +94,30 @@ class CSVGatingList {
             this.rainbow.show(d3.event.clientX, d3.event.clientY);
         };
         // Draws rows in the gating list
-        this.columns.push('Area'); // Add 'Area' to Gating List
+        // Gating markers are the feature table's own columns (e.g.
+        // adata.var_names), never the image channel list -- an image
+        // channel's display name (from OME-XML/antibody nomenclature) and
+        // its feature-table column (from adata.var_names/gene symbols, or a
+        // plain CSV header) are frequently different strings for the same
+        // marker, and every gating query (get_gated_cells, get_gating_gmm)
+        // already keys directly off the feature-table column, never the
+        // image channel name. get_datasource_description() only attaches a
+        // 'histogram' to columns it could build marker-expression stats
+        // for, which is exactly the set of real, numeric feature columns --
+        // id/X/Y are numeric too but aren't markers, so they're excluded
+        // explicitly by name. Any correspondence to a specific image
+        // channel (if ever needed) would be positional (marker i <-> image
+        // channel i), not by matching names.
+        const reservedColumns = new Set(['id']);
+        const featureConfig = (this.config.featureData || [])[0] || {};
+        [featureConfig.idField, featureConfig.xCoordinate, featureConfig.yCoordinate].forEach(col => {
+            if (col) reservedColumns.add(col);
+        });
+        this.columns = Object.keys(this.databaseDescription).filter(column => {
+            return !reservedColumns.has(column) && this.databaseDescription[column].histogram;
+        });
         _.each(this.columns, (column, index) => {
+
             let channelID = `channel_${index}`;
             this.gatingIDs[column] = channelID;
             // div for each row in gating list
@@ -284,9 +306,11 @@ class CSVGatingList {
                         const slider = this.sliders.get(shortName);
                         if (slider) {
                             // Apply the same data type conversion as in addSlider
-                            const transformed = this.dataLayer.isTransformed();
-                            const v0 = transformed ? col.gate_start : Math.floor(parseFloat(col.gate_start));
-                            const v1 = transformed ? col.gate_end : Math.ceil(parseFloat(col.gate_end));
+                            const fullName = this.dataLayer.getFullChannelName(shortName);
+                            const channelRange = [this.databaseDescription[fullName].min, this.databaseDescription[fullName].max];
+                            const factor = Math.pow(10, this.dataLayer.gateDecimals(channelRange));
+                            const v0 = Math.floor(parseFloat(col.gate_start) * factor) / factor;
+                            const v1 = Math.ceil(parseFloat(col.gate_end) * factor) / factor;
 
                             slider.silentValue([v0, v1]);
                             // Update the input fields
@@ -318,8 +342,9 @@ class CSVGatingList {
     async autoGate(shortName) {
         const fullName = this.dataLayer.getFullChannelName(shortName);
         const input = this.hasGatingGMM[shortName]['gate'].toFixed(7);
-        const transformed = this.dataLayer.isTransformed();
-        const gate = transformed ? parseFloat(input) : Math.floor(parseFloat(input));
+        const channelRange = [this.databaseDescription[fullName].min, this.databaseDescription[fullName].max];
+        const factor = Math.pow(10, this.dataLayer.gateDecimals(channelRange));
+        const gate = Math.floor(parseFloat(input) * factor) / factor;
         if (fullName in this.selections) {
             const channelID = this.gatingIDs[shortName];
             const gate_end = this.selections[fullName][1];
@@ -485,7 +510,14 @@ class CSVGatingList {
             this.eventHandler.trigger(CSVGatingList.events.GATING_BRUSH_END, this.selections);
         })
 
-        const hasSegmentation = Boolean(this.config?.segmentation || this.config?.imageData?.[0]?.src);
+        // config.segmentation is the authoritative signal -- it's set only when
+        // a segmentation file was actually registered. imageData[0].src is NOT
+        // a reliable proxy: it's the label/"Area" channel only when segmentation
+        // exists, otherwise it's just the first real image channel (always has
+        // a real src), which used to make this evaluate true even with no
+        // segmentation at all, defaulting Outlines on instead of falling back
+        // to centroids.
+        const hasSegmentation = Boolean(this.config?.segmentation);
         if (hasSegmentation && !this.seaDragonViewer.noLabel) {
             gating_controls_outlines.checked = true;
             window.setTimeout(async () => {
@@ -501,6 +533,15 @@ class CSVGatingList {
                     await this.seaDragonViewer.updateCentroidFallback(true);
                 }
             }, 0);
+        } else if (!hasSegmentation) {
+            // No segmentation was registered at all -- previously this fell
+            // back to centroids only as a side effect of ensureSegmentationReady()
+            // being wrongly attempted (via the old imageData[0]-based check)
+            // and failing. Now that hasSegmentation correctly short-circuits
+            // that attempt, fall back explicitly instead of relying on an
+            // error path that no longer runs.
+            this.seaDragonViewer.noLabel = true;
+            window.setTimeout(() => this.seaDragonViewer.updateCentroidFallback(true), 0);
         }
 
         // Toggle outlined / filled cell selections
@@ -529,7 +570,16 @@ class CSVGatingList {
         const gatingListContent = document.querySelectorAll('.gating-list-content');
 
         // Attach
-        const attach = (targets, matches, target_class, match_class, global) => {
+        // Gating markers (adata.var_names) and image channels are matched
+        // by name only when the strings happen to coincide -- the two lists
+        // are frequently different lengths (e.g. structural channels like
+        // DNA/AF1 have no marker, or var_names uses gene symbols that don't
+        // match the image's antibody-named channels), so this can never be
+        // a positional/index link. When a gating marker is selected and its
+        // exact name also appears in the image channel list, auto-open that
+        // channel for convenience; when there's no match, nothing happens
+        // and the user opens the right channel manually.
+        const attach = (targets, matches, target_class, match_class) => {
             targets.forEach(cLC => {
                 cLC.addEventListener('click', e => {
 
@@ -540,24 +590,24 @@ class CSVGatingList {
                         // Get channel name
                         const name = _.get(e.currentTarget.querySelector(`.${target_class}`), 'innerText');
 
-                        // Find match el in gating list
+                        // Find match el in channel list
                         if (name) {
                             const match = Array.from(matches).find(
-                                gLC => gLC.querySelector(`.${match_class}`).innerText === name);
+                                row => row.querySelector(`.${match_class}`).innerText === name);
 
-                            // Emulate click to trigger event in csvGatingList.js
+                            // Real click so it goes through ChannelList's own
+                            // toggleChannelPanel handler (already bound per-row
+                            // at row-creation time) -- no need to reconstruct
+                            // its event/closure state here.
                             if (match && !Array.from(match.classList).includes('active')) {
-                                const fakeEvent = { target: match };
-                                const svgCol = match.querySelector('.col-svg-wrapper')
-                                // global.abstract_click(fakeEvent, svgCol);
+                                match.click();
                             }
                         }
                     }
                 });
             });
         }
-        attach(gatingListContent, channelListContent, 'gating-name', 'channel-name',
-            this.global_channel_list);
+        attach(gatingListContent, channelListContent, 'gating-name', 'channel-name');
 
     }
 
@@ -576,21 +626,15 @@ class CSVGatingList {
         const { xDomain, yDomain, histogramData } = this.histogramData(fullName);
         let channelID = this.gatingIDs[name];
 
-        let data_min
-        let data_max
-        let handle_min
-        let handle_max
-        if (this.dataLayer.isTransformed()) {
-            data_min = d3.min(data)
-            data_max = d3.max(data)
-            handle_min = activeRange[0]
-            handle_max = activeRange[1]
-        } else {
-            data_min = Math.floor(parseFloat(d3.min(data)))
-            data_max = Math.ceil(parseFloat(d3.max(data)))
-            handle_min = Math.floor(parseFloat(activeRange[0]))
-            handle_max = Math.ceil(parseFloat(activeRange[1]))
-        }
+        // data is already [min, max] (see call sites) -- gateDecimals derives
+        // slider precision from that observed span instead of the old
+        // isTransformed config flag (see dataLayer.gateDecimals for why).
+        const channelRange = [d3.min(data), d3.max(data)];
+        const gateFactor = Math.pow(10, this.dataLayer.gateDecimals(channelRange));
+        const data_min = Math.floor(channelRange[0] * gateFactor) / gateFactor;
+        const data_max = Math.ceil(channelRange[1] * gateFactor) / gateFactor;
+        const handle_min = Math.floor(parseFloat(activeRange[0]) * gateFactor) / gateFactor;
+        const handle_max = Math.ceil(parseFloat(activeRange[1]) * gateFactor) / gateFactor;
         let f = d3.format("d")
         //add range slider row content
         const sliderSimple = d3.sliderBottom()
@@ -607,14 +651,12 @@ class CSVGatingList {
                     .size(100))
             .tickValues([])
             .on('end', (range) => {
-                const transformed = this.dataLayer.isTransformed();
-                const v0 = transformed ? range[0] : Math.floor(parseFloat(range[0]));
-                const v1 = transformed ? range[1] : Math.ceil(parseFloat(range[1]));
+                const v0 = Math.floor(parseFloat(range[0]) * gateFactor) / gateFactor;
+                const v1 = Math.ceil(parseFloat(range[1]) * gateFactor) / gateFactor;
                 this.moveSliderHandles(sliderSimple, [v0, v1], name, "GATING_BRUSH_END");
             }).on('onchange', (range) => {
-                const transformed = this.dataLayer.isTransformed();
-                const v0 = transformed ? range[0] : Math.floor(parseFloat(range[0]));
-                const v1 = transformed ? range[1] : Math.ceil(parseFloat(range[1]));
+                const v0 = Math.floor(parseFloat(range[0]) * gateFactor) / gateFactor;
+                const v1 = Math.ceil(parseFloat(range[1]) * gateFactor) / gateFactor;
                 d3.select('#gating_slider-input_' + channelID + '_0').attr('value', v0)
                 d3.select('#gating_slider-input_' + channelID + '_0').property('value', v0);
                 d3.select('#gating_slider-input_' + channelID + '_1').attr('value', v1);
@@ -692,9 +734,14 @@ class CSVGatingList {
         //entering a value in the input field of a slider handle
         const moveSliderHandles = this.moveSliderHandles.bind(this);
         handles.selectAll('.input').on('keydown', function (event, d) {
+            // Note: `this` here is the DOM <input> (d3's `function` handler
+            // convention, needed below for `this.value`) -- gateFactor is
+            // captured from the enclosing addSlider closure instead of
+            // going through `this.dataLayer`, which doesn't exist on a DOM
+            // node (a pre-existing bug: this handler would have thrown on
+            // every Enter keypress before gateFactor existed to close over).
             if (event.key == "Enter") {
-                const transformed = this.dataLayer.isTransformed();
-                const val = transformed ? parseFloat(this.value.replace("%", "")) : Math.round(parseFloat(this.value.replace("%", "")));
+                const val = Math.round(parseFloat(this.value.replace("%", "")) * gateFactor) / gateFactor;
                 const vals = sliderSimple.silentValue();
                 vals[d.index] = val;
                 moveSliderHandles(sliderSimple, vals, name, "GATING_BRUSH_END");

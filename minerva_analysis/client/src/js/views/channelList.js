@@ -239,6 +239,20 @@ class ChannelList {
         });
 
         let arrow = document.getElementById('channels_upload_icon')
+        // Gating markers are the feature-table columns get_datasource_description()
+        // could actually build a value histogram for -- a channel with no
+        // matching marker only has image-side stats (image_min/image_max),
+        // no 'histogram' key. If none of this datasource's channels have
+        // one, gating auto-match has nothing to match against, so hint at
+        // the rename upload rather than showing it unconditionally.
+        let hasAnyGatingMatch = _.some(this.columns, column => {
+            let fullName = this.dataLayer.getFullChannelName(column);
+            let description = this.databaseDescription[fullName];
+            return description && description.histogram;
+        });
+        if (!hasAnyGatingMatch) {
+            arrow.title = "No image channel matches a gating marker -- upload a CSV (one name per row, in channel order) to rename channels.";
+        }
         arrow.onclick = function () {
             let elem = document.getElementById('channels-upload-from-arrow');
             if (elem && document.createEvent) {
@@ -252,81 +266,23 @@ class ChannelList {
                 let file = document.getElementById("channels-upload-from-arrow").files[0]
                 let formData = new FormData();
                 formData.append("file", file);
-                await this.dataLayer.submitChannelUpload(formData);
+                let result = await this.dataLayer.submitChannelUpload(formData);
                 document.getElementById("channels-upload-from-arrow").value = []
-                await this.applyChannels('file');
+                if (result && result.success) {
+                    // Channel names changed on disk -- reload so the channel
+                    // list, gating panel, and cached description all pick up
+                    // the renamed channels instead of trying to patch every
+                    // dependent piece of UI state in place.
+                    window.location.reload();
+                } else {
+                    alert('Failed to rename channels: ' + (result && result.error ? result.error : 'unknown error'));
+                }
             }
         }
 
         this.addDownloadEvents();
     }
 
-    /**
-     * @function applyChannels
-     * Applies settings (from file or db) to the channels
-     * @parms {String} source Whether it is from new file upload or saved
-     */
-    async applyChannels(source) {
-        let channels;
-        if (source === 'file'){
-            channels = await this.dataLayer.getUploadedChannelCsvValues();
-        } else {
-            channels = await this.dataLayer.getSavedChannelList();
-        }
-
-        let defaultRange = this.dataLayer.imageBitRange;
-
-        // this.eventHandler.trigger(ChannelList.events.RESET_LISTS);
-        _.each(channels, col => {
-            let fullName = this.dataLayer.getFullChannelName(col.channel);
-            let channelIdx = imageChannels[fullName];
-            let channelID = this.channelIDs[col.channel];
-
-            if (this.sliders.get(col.channel)) {
-                if (this.currentChannels[channelIdx]) {
-                        let channel_selector = `#channel-slider_${channelID}`;
-                        document.querySelector(channel_selector).click();
-                }
-            }
-        })
-
-        this.currentChannels = {};
-        this.rangeConnector = {};
-        this.colorConnector = {};
-
-        _.each(channels, col => {
-            let fullName = this.dataLayer.getFullChannelName(col.channel);
-            let channelIdx = imageChannels[fullName];
-            let channelID = this.channelIDs[col.channel];
-
-            if (this.sliders.get(col.channel)) {
-                if (col.start > this.image_channels[col.channel][0] || col.end < this.image_channels[col.channel][1]){
-                    this.sliders.get(col.channel).value([col.start, col.end]);
-                    this.rangeConnector[channelIdx] = [col.start / defaultRange[1], col.end / defaultRange[1]];
-                }
-
-                if (col.r !== 255 || col.g !== 255 || col.b !== 255) {
-                    let rgbColor = `rgb(${col.r}, ${col.g}, ${col.b})`;
-                    let selectorColor = `#color_${channelID}`;
-                    // document.querySelector(selectorColor).setAttribute("fill", rgbColor);
-                    let selectorDoc = document.querySelector(selectorColor);
-                    selectorDoc.style.fill = rgbColor;
-                    let channelColor = {
-                        r: col.r,
-                        g: col.g,
-                        b: col.b,
-                        opacity: col.opacity
-                    };
-                    this.colorConnector[channelIdx] = {color: channelColor};
-                }
-
-                if (col['channel_active']) {
-                    let selector = `#channel-slider_${channelID}`;
-                    document.querySelector(selector).click();
-                }
-            }
-        })
-    }
 
 
      auto_channel(name) {

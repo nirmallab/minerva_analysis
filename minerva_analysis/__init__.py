@@ -102,5 +102,5 @@ def get_config_names():
         return []
 
 
-from minerva_analysis.server.routes import page_routes, data_routes, import_routes
+from minerva_analysis.server.routes import page_routes, data_routes, import_routes, datasource_config_routes
 from minerva_analysis.server.models import data_model, database_model

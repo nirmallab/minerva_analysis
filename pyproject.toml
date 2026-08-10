@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minerva-analysis"
-version = "1.0.9"
+version = "1.0.12"
 description = "OpenSeadragon-based cellular image viewing and analysis tool."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = "MIT"
 dependencies = [
+    "anndata>=0.10",
     "appdirs",
     "Flask>=3.1",
     "Flask-SQLAlchemy>=3.1",

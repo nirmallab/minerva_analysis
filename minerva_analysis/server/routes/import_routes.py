@@ -584,9 +584,8 @@ def check_file_existence():
     post_data = json.loads(request.data)
     # Handle path that begins and ends
     if 'path' in post_data:
-        path = Path(post_data['path'])
-        path = trim_filepath_quotes(path)
-        if path.is_file():
+        path = trim_filepath_quotes(post_data['path'])
+        if Path(path).is_file():
             return serialize_and_submit_json(True)
         return serialize_and_submit_json(False)
 
@@ -595,10 +594,9 @@ def check_path_existence():
     # path and type information from upload
     post_data = json.loads(request.data)
     if 'path' in post_data:
-        path = Path(post_data['path'])
-        path = trim_filepath_quotes(path)
+        path = trim_filepath_quotes(post_data['path'])
         # if full path exists
-        if path.is_dir():
+        if Path(path).is_dir():
             return serialize_and_submit_json(True)
         # if path does not exist
         return serialize_and_submit_json(False)

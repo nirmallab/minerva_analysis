@@ -34,26 +34,50 @@ function deriveDatasetName(path) {
     return base.replace(/\.(ome\.tiff|ome\.tif|ome\.zarr|tiff|tif|svs|zarr|png|qptiff)$/i, "");
 }
 
-function suggestDatasetName(caller) {
+function suggestDatasetName(caller, targetFieldId) {
     if (datasetNameManuallyEdited) return;
-    const nameField = document.getElementById("name");
+    const nameField = document.getElementById(targetFieldId || "name");
     if (!nameField) return;
     const suggested = deriveDatasetName(caller && caller.value);
     if (suggested) nameField.value = suggested;
 }
 
-//add listener
-d3.select("#import_type").on("change", update);
+//SOURCE TYPE SELECTION -- segmented control (csv / mcmicro / anndata)
+//replaces the old #import_type checkbox now that there are 3 source types
+function selectImportType(type) {
+    document.querySelectorAll('.source-type-tab').forEach(function (tab) {
+        tab.classList.toggle('active', tab.dataset.type === type);
+    });
+    const forms = {csv: 'custom_form', mcmicro: 'mcmicro_form', anndata: 'anndata_form'};
+    Object.keys(forms).forEach(function (key) {
+        d3.select('#' + forms[key]).style('display', key === type ? 'block' : 'none');
+    });
+}
 
-function update() {
-    if (d3.select("#import_type").property("checked")) {
-        console.log('is checked');
-        d3.select('#mcmicro_form').style("display", 'inline');
-        d3.select('#custom_form').style("display", 'none');
-    } else {
-        d3.select('#mcmicro_form').style("display", 'none');
-        d3.select('#custom_form').style("display", 'inline');
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('.source-type-tab').forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            selectImportType(tab.dataset.type);
+        });
+        tab.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                selectImportType(tab.dataset.type);
+            }
+        });
+    });
+});
+
+//check an optional file path -- clears validity entirely when left blank
+//instead of flagging an empty optional field as invalid
+async function checkOptionalFileExistence(caller) {
+    const inputField = d3.select('#' + caller.id);
+    if (!inputField.property('value')) {
+        inputField.attr('class', 'form-control');
+        inputField.node().setCustomValidity('');
+        return true;
     }
+    return checkFileExistence(caller);
 }
 
 //check if path and channel file exist in the specified MCMICRO output foder
@@ -391,15 +415,24 @@ async function fillSegFileList() {
 }
 
 
+//Form submission is intentionally left to the browser's native POST
+//navigation (no AJAX interception here) -- the response is a full rendered
+//HTML page (channel_match.html / datasource_config.html), and both that
+//page and this one load the same base.html script stack (dataLayer.js,
+//viewerSidebar.js, etc.), which declare top-level `class`/`let` bindings.
+//An AJAX submit + document.write() swap keeps the same JS realm, so those
+//declarations collide with the ones already loaded on this page and throw
+//"Identifier has already been declared" -- this affected the original
+//jquery-form ajaxForm() success handler too (it also called
+//document.write()), it just never surfaced because jquery-form@4.3.0's
+//ajaxSubmit() calls the removed $.trim() and throws under jQuery 4.x before
+//ever reaching a successful response. A real navigation gets a fresh JS
+//realm and sidesteps the problem entirely.
+//
+//uploadPercentage is read by the SSE-driven onupload() below; there's no
+//real file upload in these forms (just server-side paths under multipart
+//encoding), so it never leaves its initial 0.
 let uploadPercentage = 0;
-let ajaxForm = $('form').ajaxForm({
-    uploadProgress: function (event, position, total, percentComplete) {
-        uploadPercentage = percentComplete;
-    },
-    success: function (res) {
-        document.write(res);
-    }
-});
 
 function displayPercentage(totalPercentage, currentTask) {
     if (totalPercentage == 0) {

@@ -66,18 +66,6 @@ class DataLayer {
         }
     }
 
-    async getUploadedChannelCsvValues() {
-        try {
-            let response = await fetch(minervaUrl('get_uploaded_channel_csv_values') + '?' + new URLSearchParams({
-                datasource: datasource
-            }))
-            let response_data = await response.json();
-            return response_data;
-        } catch (e) {
-            console.log("Error Getting Uploaded Channels", e);
-        }
-    }
-
     async getSavedChannelList() {
         try {
             let response = await fetch(minervaUrl('get_saved_channel_list') + '?' + new URLSearchParams({
@@ -588,15 +576,26 @@ class DataLayer {
     }
 
     /**
-     * whether the current data is log transformed or not
-     * @returns {boolean}
+     * Decimal-place precision for gate slider rounding, derived from the
+     * channel's own observed [min, max] span rather than a stored config
+     * flag -- aims for ~200 distinguishable steps across the range. Wide
+     * integer-scale channels (e.g. raw 0-65535 pixel intensities) land on 0
+     * decimals (whole-number gates); narrow float-scale channels (e.g.
+     * already log/arcsinh-transformed markers spanning ~1.7-2.2) get enough
+     * decimal places to stay meaningful. Replaces the old
+     * featureData.isTransformed config flag, which had to be set correctly
+     * (and consistently across datasources built from the same source data)
+     * at import time and silently broke gating whenever it didn't match the
+     * data's actual scale -- this is instead computed fresh from the same
+     * min/max every request already returns, so it can't drift out of sync.
+     * @param {number[]} range - [min, max] of the channel being gated
+     * @returns {number}
      */
-    isTransformed(){
-      if (this.config["featureData"][0]["isTransformed"]  !== undefined &&
-          this.config["featureData"][0]["isTransformed"] == true){
-          return true;
-      }
-      return false;
+    gateDecimals(range) {
+        const span = Math.abs(((range && range[1]) || 0) - ((range && range[0]) || 0));
+        if (!Number.isFinite(span) || span <= 0) return 0;
+        const decimals = Math.ceil(Math.log10(200 / span));
+        return Math.max(0, Math.min(6, decimals));
     }
 
 

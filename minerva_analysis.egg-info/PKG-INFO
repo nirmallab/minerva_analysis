@@ -1,11 +1,12 @@
 Metadata-Version: 2.4
 Name: minerva-analysis
-Version: 1.0.6
+Version: 1.0.12
 Summary: OpenSeadragon-based cellular image viewing and analysis tool.
 License-Expression: MIT
 Requires-Python: <3.14,>=3.12
 Description-Content-Type: text/markdown
 License-File: LICENSE
+Requires-Dist: anndata>=0.10
 Requires-Dist: appdirs
 Requires-Dist: Flask>=3.1
 Requires-Dist: Flask-SQLAlchemy>=3.1
@@ -17,8 +18,8 @@ Requires-Dist: numpy>=2.0
 Requires-Dist: ome-types>=0.6.3
 Requires-Dist: opencv-python>=4.12
 Requires-Dist: orjson>=3.11
-Requires-Dist: pandas>=3.0
 Requires-Dist: Pillow>=10.4
+Requires-Dist: polars>=1.43
 Requires-Dist: pydantic<2.14,>=2.13
 Requires-Dist: scikit-image
 Requires-Dist: scikit-learn>=1.9

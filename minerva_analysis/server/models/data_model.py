@@ -11,6 +11,7 @@ from pathlib import PurePath
 from ome_types import from_xml
 from minerva_analysis import config_json_path, data_path, cwd_path
 from minerva_analysis.server.utils import pyramid_assemble, pyramid_upgrade
+from minerva_analysis.server.models.adapters import get_adapter
 from minerva_analysis.server.models import database_model, centroid_tiles
 from minerva_analysis.server.utils import smallestenclosingcircle
 import matplotlib.path as mpltPath
@@ -206,29 +207,23 @@ def load_datasource(datasource_name, reload=False):
     global metadata
     global load_generation
     with load_lock:
-        if source == datasource_name and datasource is not None and seg is not None and channels is not None and reload is False:
+        if source == datasource_name and datasource is not None and channels is not None and reload is False:
             return
         load_config(datasource_name)
         if reload:
             load_ball_tree(datasource_name, reload=reload)
-        csvPath = Path(config[datasource_name]['featureData'][0]['src'])
-        print("Loading csv data.. (this can take some time)")
-        loaded_datasource = pl.read_csv(csvPath)
-        # Manufacture a stable positional 'id' column, mirroring pandas'
-        # implicit RangeIndex usage in the code this replaced -- must happen
-        # immediately after read_csv, before any other transform, since
-        # downstream code treats 'id' as a stable per-row identity.
-        loaded_datasource = loaded_datasource.with_row_index("id").with_columns(pl.col("id").cast(pl.Int64))
-        numeric_cols = [c for c, dt in loaded_datasource.schema.items() if dt in (pl.Float32, pl.Float64)]
-        loaded_datasource = loaded_datasource.with_columns([
-            pl.when(pl.col(c) == float("-inf")).then(0).otherwise(pl.col(c)).alias(c)
-            for c in numeric_cols
-        ])
+        data_type = config[datasource_name].get('data_type', 'csv')
+        adapter = get_adapter(data_type)(config[datasource_name]['featureData'][0])
+        print("Loading datasource data.. (this can take some time)")
+        loaded_datasource = adapter.load_table().table
         print("Loading segmentation.")
-        if config[datasource_name]['segmentation'].endswith('.zarr'):
-            loaded_seg = zarr.open(config[datasource_name]['segmentation'])
+        segmentation_path = config[datasource_name].get('segmentation')
+        if not segmentation_path:
+            loaded_seg = None
+        elif str(segmentation_path).endswith('.zarr'):
+            loaded_seg = zarr.open(segmentation_path)
         else:
-            seg_io = tf.TiffFile(config[datasource_name]['segmentation'], is_ome=False)
+            seg_io = tf.TiffFile(segmentation_path, is_ome=False)
             loaded_seg = zarr.open(seg_io.series[0].aszarr())
         channel_io = tf.TiffFile(config[datasource_name]['channelFile'], is_ome=False)
         print("Loading image descriptions.")
@@ -291,18 +286,13 @@ def load_config(datasource_name):
         if original != config[datasource_name]['featureData'][0]['src']:
             updated = True
 
-        try:
-            original = config[datasource_name]['segmentation']
-            config[datasource_name]['segmentation'] = original.replace('static/data', 'minerva_analysis/data')
-            config[datasource_name]['segmentation'] = ensure_outline_segmentation(
-                config[datasource_name]['segmentation'],
-                data_path / datasource_name,
-            )
-            if original != config[datasource_name]['segmentation']:
+        segmentation_path = config[datasource_name].get('segmentation')
+        if segmentation_path:
+            updated_path = segmentation_path.replace('static/data', 'minerva_analysis/data')
+            updated_path = ensure_outline_segmentation(updated_path, data_path / datasource_name)
+            if updated_path != segmentation_path:
+                config[datasource_name]['segmentation'] = updated_path
                 updated = True
-
-        except KeyError:
-            print(datasource_name, 'is  missing segmentation')
 
         if updated:
             configJson.seek(0)  # <--- should reset file position to the beginning.
@@ -427,11 +417,13 @@ def get_channel_names(datasource_name, shortnames=True):
     global datasource
     global source
     _ensure_loaded(datasource_name)
-    if shortnames:
-        channel_names = [channel['name'] for channel in config[datasource_name]['imageData'][1:]]
-    else:
-        channel_names = [channel['fullname'] for channel in config[datasource_name]['imageData'][1:]]
-    return channel_names
+    # imageData[0] is only the "Area" placeholder when segmentation was
+    # registered -- without it, index 0 is a real channel. Filter by name
+    # instead of slicing [1:], which silently dropped the first real
+    # channel for segmentation-less datasources.
+    real_channels = [channel for channel in config[datasource_name]['imageData'] if channel['fullname'] != 'Area']
+    key = 'name' if shortnames else 'fullname'
+    return [channel[key] for channel in real_channels]
 
 
 def _gate_filter_columns(datasource_name, columns):
@@ -868,6 +860,19 @@ def get_datasource_description(datasource_name):
     for channel in list_channels:
         if channel['name'] != 'Area':
             fullName = channel['fullname']
+            if fullName not in description:
+                # No feature-table column matches this image channel's
+                # display name -- happens whenever the image has more
+                # channels than the feature table has markers (a synthetic
+                # "<file>_<i>" fallback name gets used for the extra
+                # channels in register_datasource()/register_anndata_
+                # datasource() alike). There's no marker-expression data to
+                # describe, but image_min/image_max/image_histogram below are
+                # pure pixel statistics computed straight from the image
+                # array -- they don't need a feature column, and the channel
+                # list UI (channelList.js) reads them for every image
+                # channel unconditionally, so this entry must still exist.
+                description[fullName] = {}
 
             image_data = zarray[image_layer]
             img_log = np.log(image_data[image_data > 0])
@@ -909,8 +914,13 @@ def get_channel_gmm(channel_name, datasource_name):
 
     packet_gmm = {}
 
-    image_channelIdx = next(
-        index for (index, d) in enumerate(config[datasource_name]['imageData']) if d["fullname"] == channel_name) - 1
+    # zarray only ever holds the real image channels (Area is a Minerva-side
+    # UI placeholder, never part of the physical image) -- so the correct
+    # zarray index is the channel's position among imageData entries with
+    # fullname != 'Area', not its raw imageData index minus a hardcoded 1
+    # (which was only correct when segmentation put Area at position 0).
+    real_channels = [d for d in config[datasource_name]['imageData'] if d['fullname'] != 'Area']
+    image_channelIdx = next(index for (index, d) in enumerate(real_channels) if d["fullname"] == channel_name)
     image_data = zarray[image_channelIdx]
     img_log = np.log(image_data[image_data > 0])
     gmm = GaussianMixture(3, max_iter=1000, tol=1e-6)

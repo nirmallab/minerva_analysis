@@ -49,6 +49,23 @@ def _feature_config(config, datasource_name):
     return config[datasource_name]["featureData"][0]
 
 
+def _load_table(config, datasource_name):
+    """Load the full normalized datasource table through the same adapter
+    data_model.py dispatches on, rather than assuming featureData[0]['src']
+    is always a CSV -- that assumption broke entirely for non-CSV
+    datasources (e.g. AnnData, where 'src' is an .h5ad path, and columns
+    like the configured id/X/Y fields only exist after adapter
+    normalization, not in the raw source file at all). Local import avoids
+    a circular dependency with data_model.py, which itself imports this
+    module.
+    """
+    from minerva_analysis.server.models.adapters import get_adapter
+
+    feature_data = _feature_config(config, datasource_name)
+    data_type = config[datasource_name].get("data_type", "csv")
+    return get_adapter(data_type)(feature_data).load_table().table
+
+
 def _source_signature(csv_path):
     stat = csv_path.stat()
     return {
@@ -125,9 +142,8 @@ def build_cache(config, datasource_name, expected=None):
         shutil.rmtree(tmp_root)
     tmp_root.mkdir(parents=True, exist_ok=True)
 
-    csv_path = Path(expected["csv_path"])
     usecols = [expected["id_column"], expected["x_column"], expected["y_column"]]
-    table = pl.read_csv(csv_path, columns=usecols)
+    table = _load_table(config, datasource_name).select(usecols)
 
     # Explicit null->NaN fill (rather than relying on Polars' default float
     # export behavior) so invalid/unparseable values behave like pandas'
@@ -224,7 +240,7 @@ def _load_filter_table(config, datasource_name, gates):
     if cached is not None:
         return cached
 
-    table = pl.read_csv(expected["csv_path"], columns=list(gate_columns))
+    table = _load_table(config, datasource_name).select(list(gate_columns))
     numeric = {}
     for column in gate_columns:
         numeric[column] = (

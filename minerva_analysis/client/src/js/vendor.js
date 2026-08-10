@@ -9,7 +9,6 @@ import {regeneratorRuntime} from "regenerator-runtime";
 import * as d3 from 'd3';
 import {sliderBottom} from 'd3-simple-slider';
 import 'lodash'
-import 'jquery-form'
 import '@fortawesome/fontawesome-free/js/all'
 import Sortable from 'sortablejs';
 import Mark from 'mark.js'

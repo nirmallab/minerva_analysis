@@ -121,3 +121,71 @@ def test_low_zoom_tile_query_respects_max_points(tmp_path, monkeypatch):
     records = centroid_tiles.get_tiles(config, "sample", 1, [{"x": 0, "y": 0}], max_points=20)
 
     assert len(records) <= 20
+
+
+def _write_anndata(path, n=20):
+    import anndata as ad
+    import pandas as pd
+
+    # String obs_names (not small integers) -- the realistic case, and the
+    # one that broke get_manifest()/get_tiles() before centroid_tiles.py
+    # read the raw .h5ad path with pl.read_csv() (a CSV-only assumption).
+    obs = pd.DataFrame(index=[f"cell--{i}" for i in range(n)])
+    var = pd.DataFrame(index=["MarkerA", "MarkerB"])
+    x = np.stack([np.linspace(0, 10, n), np.linspace(10, 0, n)], axis=1).astype(np.float32)
+    adata = ad.AnnData(X=x, obs=obs, var=var)
+    adata.obsm["spatial"] = np.stack(
+        [np.arange(n, dtype=np.float64) * 20 + 5, np.arange(n, dtype=np.float64) * 10 + 7], axis=1
+    )
+    adata.write_h5ad(path)
+
+
+def test_centroid_manifest_and_tiles_work_for_anndata_datasource(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(centroid_tiles, "data_path", data_dir)
+    h5ad_path = tmp_path / "cells.h5ad"
+    _write_anndata(h5ad_path, n=20)
+
+    # register_anndata_datasource() requires a real image (it runs
+    # convertOmeTiff for pyramid metadata) -- centroid_tiles doesn't touch
+    # the image at all, so build just the featureData config entry directly,
+    # matching the shape register_anndata_datasource() would have written.
+    config = {
+        "anndata_sample": {
+            "data_type": "anndata",
+            "featureData": [
+                {
+                    "src": str(h5ad_path),
+                    "normalization": "none",
+                    "isTransformed": False,
+                    "xCoordinate": "X",
+                    "yCoordinate": "Y",
+                    "idField": "id",
+                    "dataSource": {
+                        "format": "anndata",
+                        "path": str(h5ad_path),
+                        "coordinates": {"source": "obsm", "obsm_key": "spatial"},
+                        "features": {"source": "X"},
+                        "obs_id_field": None,
+                        "subset": {},
+                    },
+                }
+            ],
+            "width": 1024,
+            "height": 1024,
+            "tileWidth": 256,
+            "tileHeight": 256,
+            "maxLevel": 3,
+        }
+    }
+
+    manifest = centroid_tiles.get_manifest(config, "anndata_sample", build=True)
+    assert manifest["status"] == "ready"
+    assert manifest["point_count"] == 20
+
+    records = centroid_tiles.get_tiles(
+        config, "anndata_sample", 0, [{"x": 0, "y": 0}], gates={"MarkerA": [2.0, 8.0]}
+    )
+    assert len(records) > 0
+    assert records["id"].dtype == np.uint32

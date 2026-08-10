@@ -1,169 +1,150 @@
 {% extends 'base.html' %}
+{% block style %}
+    <link rel="stylesheet" href="../client/src/css/import.css">
+{% endblock %}
 {% block content %}
 <title>Minerva Analysis - Data Upload</title>
-<div class="container" id="upload-parent">
-    <span>Upload Form</span>
-    <div class="sectionContent" id="upload-container">
-        <div class="row">
-            <div class="col">
-                    <div class="row">
-                        <div class="col-3">
-                            <label for="import_type">MCMICRO</label>
-                        </div>
-                        <div class="col-auto">
-                            <input type="checkbox" id="import_type" name="is_mc_micro" value="mcmicro">
-                        </div>
+<div class="import-page">
+    <div id="upload-parent">
+        <div class="import-card" id="upload-container">
+            <span class="import-kicker">New Datasource</span>
+            <h1>Import Data</h1>
+            <p class="import-subtitle">Register an image, optional segmentation mask, and feature table as a new
+                viewable datasource.</p>
+
+            {% if data.error %}
+                <div class="import-alert" role="alert">{{ data.error }}</div>
+            {% endif %}
+
+            <div class="source-type-tabs" role="tablist">
+                <div class="source-type-tab active" data-type="csv" role="tab" tabindex="0">CSV / Image Files</div>
+                <div class="source-type-tab" data-type="mcmicro" role="tab" tabindex="0">MCMICRO Output</div>
+                <div class="source-type-tab" data-type="anndata" role="tab" tabindex="0">AnnData (.h5ad)</div>
+            </div>
+
+            <form action="{{ data.base_url }}/upload" id="custom_form" method="POST" class="needs-validation"
+                  enctype="multipart/form-data" novalidate>
+                <div class="import-field">
+                    <label for="name">Dataset Name</label>
+                    <input type="text" class="form-control" id="name" name="name" oninput="markDatasetNameEdited()"
+                           required placeholder="e.g. patient_01">
+                    <div class="invalid-feedback">Please name the dataset.</div>
+                </div>
+                <div class="import-field">
+                    <label for="channel_file">Image File Path</label>
+                    <input type="text" id="channel_file" class="form-control" name="channel_file"
+                           onkeyup="checkFileExistence(this); suggestDatasetName(this);" required
+                           placeholder="/path/to/image.ome.tif">
+                    <div class="invalid-feedback">Please provide a valid path to the channel image file.</div>
+                </div>
+                <div class="import-field">
+                    <label for="label_file">Segmentation File Path</label>
+                    <input type="text" id="label_file" class="form-control" name="label_file"
+                           onkeyup="checkFileExistence(this)" required placeholder="/path/to/segmentation.ome.tif">
+                    <div class="invalid-feedback">Please provide a valid path to the segmentation mask.</div>
+                </div>
+                <div class="import-field">
+                    <label for="csv_file">Quantification CSV Path</label>
+                    <input type="text" id="csv_file" class="form-control" name="csv_file"
+                           onkeyup="checkFileExistence(this)" required placeholder="/path/to/cells.csv">
+                    <div class="invalid-feedback">Please provide a valid single-cell CSV file.</div>
+                </div>
+                <div class="import-actions">
+                    <button id="upload_button" class="btn btn-primary" type="submit" name="action" value="Upload">
+                        Continue
+                    </button>
+                </div>
+            </form>
+
+            <form action="{{ data.base_url }}/upload" id="mcmicro_form" method="POST" class="needs-validation"
+                  enctype="multipart/form-data" style="display:none" novalidate>
+                <input type="hidden" name="is_mc_micro" value="mcmicro">
+                <div class="import-field">
+                    <label for="mcmicro_name">Dataset Name</label>
+                    <input type="text" class="form-control" id="mcmicro_name" name="mcmicro_name"
+                           onkeyup="checkDatasetExistence(this)"
+                           placeholder="Optional -- defaults to the MCMICRO project name">
+                    <span class="field-hint">If left blank, the MCMICRO project name is used.</span>
+                    <div class="invalid-feedback">Dataset name already exists. Please choose a different name.</div>
+                </div>
+                <div class="import-field">
+                    <label for="mcmicro_output_folder">MCMICRO Output Path</label>
+                    <input type="text" class="form-control" id="mcmicro_output_folder" name="mcmicro_output_folder"
+                           required
+                           onkeyup="fillCSVFileList(); fillImgFileList(); fillSegFileList(); checkMCOutputFolder(this)"
+                           placeholder="/path/to/mcmicro/output">
+                    <div class="invalid-feedback" id="mcmicro_path_validation_text">Please provide a valid path.
                     </div>
-                <form action="{{ data.base_url }}/upload" id="custom_form" method="POST" class="needs-validation" enctype="multipart/form-data"  novalidate>
-                    <div class="row">
-                        <div class="col-3">
-                            <label for="name" >Dataset Name:</label>
-                        </div>
-                        <div class="col-9">
-                            <input type="text" class="form-control" id="name" name="name" oninput="markDatasetNameEdited()" required>
-                            <div class="valid-feedback">Valid.</div>
-                            <div class="invalid-feedback">
-                                Please name the dataset.
-                            </div>
-                            <br>
-                        </div>
+                </div>
+                <div class="import-field">
+                    <label for="mcmicro_masks">Quantification File</label>
+                    <select id="mcmicro_masks" class="form-select" name="masks" required
+                            onchange="checkCSVFileExistence(this);"></select>
+                    <div class="invalid-feedback" id="mcmicro_mask_validation_text">No mask files found under this
+                        path.
                     </div>
-                    <div id="custom_import" style="display: inline;">
-                        <div class="row">
-                            <div class="col-3">
-                                <label for="channel_file">Image File Path:</label>
-                            </div>
-                            <div class="col-9">
-                                <input type="text" id="channel_file" class="form-control" name="channel_file" onkeyup="checkFileExistence(this); suggestDatasetName(this);" required>
-                                <div class="valid-feedback">Valid.</div>
-                                <div class="invalid-feedback">
-                                    Please provide a valid path to the channel image file.
-                                </div>
-                                <br>
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-3">
-                                <label for="label_file">Segmentation File Path:</label>
-                            </div>
-                            <div class="col-9">
-                                <input type="text" id="label_file" class="form-control" name="label_file" onkeyup="checkFileExistence(this)" required>
-                                <div class="valid-feedback">Valid.</div>
-                                <div class="invalid-feedback">
-                                    Please provide a valid path to the segmentation mask.
-                                </div>
-                                <br>
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-3">
-                                <label for="csv_file">Quantification File CSV:</label>
-                            </div>
-                            <div class="col-9">
-{#                                <input type="file" id="csv_file" name="csv_file" required>#}
-                                <input type="text" id="csv_file" class="form-control" name="csv_file" onkeyup="checkFileExistence(this)" required>
-                                <div class="valid-feedback">Valid.</div>
-                                <div class="invalid-feedback">
-                                    Please provide a valid single cell csv file.
-                                </div>
-                                <br>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-3">
-                            <button id="upload_button" class="btn btn-primary" type="submit" name="action" value="Upload">Submit</button>
-                        </div>
-                    </div>
-                </form>
-                <form action="{{ data.base_url }}/upload" id="mcmicro_form" method="POST" a href="javascript:;" class="needs-validation" enctype="multipart/form-data" style="display:none" novalidate>
-                    <div class="row">
-                        <div class="col-3">
-                            <label for="name" >Dataset Name:</label>
-                        </div>
-                        <div class="col-9">
-                            <input type="text" class="form-control" id="mcmicro_name" name="mcmicro_name" onkeyup="checkDatasetExistence(this)">
-                            <div class="valid-feedback">Valid. (if no name chosen mcmicro project name is used.)</div>
-                            <div class="invalid-feedback">
-                                Dataset name already exists. Please choose a different name.
-                            </div>
-                            <br>
-                        </div>
-                    </div>
-                    <div id="mcmicro_import">
-                        <div class="row ">
-                            <div class="col-3">
-                                <label for="name" class="form-label">Path:</label>
-                            </div>
-                            <div class="col-9">
-                                <input type="text" class="form-control" id="mcmicro_output_folder" name="mcmicro_output_folder" required onkeyup="fillCSVFileList(); fillImgFileList(); fillSegFileList(); checkMCOutputFolder(this)">
-                                <div class="valid-feedback">Valid.</div>
-                                <div class="invalid-feedback" id="mcmicro_path_validation_text">
-                                  Please provide a valid path.
-                                </div>
-                                <br>
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-3">
-                                <label for="mcmicro_masks">Choose a quantification file:</label>
-                            </div>
-                            <div class="col-auto">
-                              <select id="mcmicro_masks" class="form-control" name="masks" required onchange="checkCSVFileExistence(this);">
-                              </select>
-                                <div class="valid-feedback">Valid.</div>
-                                <div class="invalid-feedback" id="mcmicro_mask_validation_text">
-                                    No mask files found under this path.
-                                </div>
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-3">
-                                <label for="mcmicro_images">Choose an image file:</label>
-                            </div>
-                            <div class="col-auto">
-                              <select id="mcmicro_images" class="form-control" name="images" required onchange="checkChannelExistence(this);">
-                              </select>
-                                <div class="valid-feedback">Valid.</div>
-                                <div class="invalid-feedback" id="mcmicro_mask_validation_text">
-                                    No image files found under this path.
-                                </div>
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-3">
-                                <label for="mcmicro_seg">Choose a segmentation file:</label>
-                            </div>
-                            <div class="col-auto">
-                              <select id="mcmicro_seg" class="form-control" name="segs" required onchange="checkChannelExistence(this);">
-                              </select>
-                                <div class="valid-feedback">Valid.</div>
-                                <div class="invalid-feedback" id="mcmicro_mask_validation_text">
-                                    No image files found under this path.
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-3">
-                            <button id="upload_button_mcmicro" a href="javascript:;" class="btn btn-primary" type="submit" name="action" value="Upload">Submit</button>
-                        </div>
-                    </div>
-                </form>
-                <did class="row">
-                    <div class="col-8">
-                        <br>
-                        <div id="progress">
-                            <div class="progress-bar progress-bar-striped active">
-                                <span id="progress-bar-percentage" class="progress-bar-label">0%</span>
-                                <span id="progress-bar-current-task" class="progress-bar-label">0%</span>
-                            </div>
-                        </div>
-                    </div>
-                </did>
+                </div>
+                <div class="import-field">
+                    <label for="mcmicro_images">Image File</label>
+                    <select id="mcmicro_images" class="form-select" name="images" required
+                            onchange="checkChannelExistence(this);"></select>
+                    <div class="invalid-feedback">No image files found under this path.</div>
+                </div>
+                <div class="import-field">
+                    <label for="mcmicro_seg">Segmentation File</label>
+                    <select id="mcmicro_seg" class="form-select" name="segs" required
+                            onchange="checkChannelExistence(this);"></select>
+                    <div class="invalid-feedback">No segmentation files found under this path.</div>
+                </div>
+                <div class="import-actions">
+                    <button id="upload_button_mcmicro" class="btn btn-primary" type="submit" name="action"
+                            value="Upload">Continue
+                    </button>
+                </div>
+            </form>
+
+            <form action="{{ data.base_url }}/import_anndata" id="anndata_form" method="POST"
+                  class="needs-validation" enctype="multipart/form-data" style="display:none" novalidate>
+                <div class="import-field">
+                    <label for="anndata_name">Dataset Name</label>
+                    <input type="text" class="form-control" id="anndata_name" name="name"
+                           oninput="markDatasetNameEdited()" required placeholder="e.g. patient_01">
+                    <div class="invalid-feedback">Please name the dataset.</div>
+                </div>
+                <div class="import-field">
+                    <label for="anndata_channel_file">Image File Path</label>
+                    <input type="text" id="anndata_channel_file" class="form-control" name="channel_file"
+                           onkeyup="checkFileExistence(this); suggestDatasetName(this, 'anndata_name');" required
+                           placeholder="/path/to/image.ome.tif">
+                    <div class="invalid-feedback">Please provide a valid path to the channel image file.</div>
+                </div>
+                <div class="import-field">
+                    <label for="anndata_label_file">Segmentation File Path <span class="field-hint">(optional)</span></label>
+                    <input type="text" id="anndata_label_file" class="form-control" name="label_file"
+                           onkeyup="checkOptionalFileExistence(this)" placeholder="/path/to/segmentation.ome.tif">
+                </div>
+                <div class="import-field">
+                    <label for="anndata_h5ad_file">AnnData File Path (.h5ad)</label>
+                    <input type="text" id="anndata_h5ad_file" class="form-control" name="h5ad_file"
+                           onkeyup="checkFileExistence(this)" required placeholder="/path/to/cells.h5ad">
+                    <div class="invalid-feedback">Please provide a valid .h5ad file.</div>
+                </div>
+                <div class="import-actions">
+                    <button id="upload_button_anndata" class="btn btn-primary" type="submit" name="action"
+                            value="Upload">Continue
+                    </button>
+                </div>
+            </form>
+
+            <div id="progress">
+                <div class="progress-bar progress-bar-striped active">
+                    <span id="progress-bar-percentage" class="progress-bar-label">0%</span>
+                    <span id="progress-bar-current-task" class="progress-bar-label">0%</span>
+                </div>
+                <div id="upload-message"></div>
             </div>
         </div>
     </div>
 </div>
-<script src="../client/src/js/services/importFormValidation.js" defer></script>
+<script src="../client/src/js/services/importFormValidation.js?v=20260806_centroid_tiles" defer></script>
 {% endblock %}

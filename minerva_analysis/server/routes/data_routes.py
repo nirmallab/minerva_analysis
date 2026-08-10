@@ -1,8 +1,10 @@
 from minerva_analysis import app
 from flask import make_response, render_template, request, Response, jsonify, abort, send_file, stream_with_context
+import csv
 import io
 from PIL import Image
 from minerva_analysis import data_path, get_config
+from minerva_analysis.datasource import rename_channels
 from minerva_analysis.server.models import data_model
 from pathlib import Path
 from time import time
@@ -159,18 +161,38 @@ def upload_gates():
 
 @app.route('/upload_channels', methods=['POST'])
 def upload_channels():
+    """Rename an already-registered datasource's image channels from an
+    uploaded single-column CSV (one name per row, in channel order) -- lets
+    users fix gating/channel auto-matching without re-registering the whole
+    datasource. If the row count is exactly one more than the channel count,
+    the first row is assumed to be a header and dropped.
+    """
     file = request.files['file']
     if file.filename.endswith('.csv') == False:
         abort(422)
     datasource = request.form['datasource']
-    save_path = data_path / datasource
-    if save_path.is_dir() == False:
+    config = get_config()
+    if datasource not in config:
         abort(422)
 
-    filename = 'uploaded_channels.csv'
-    file.save(Path(save_path / filename))
-    resp = jsonify(success=True)
-    return resp
+    n_channels = sum(1 for c in config[datasource]['imageData'] if c['name'] != 'Area')
+
+    text = file.read().decode('utf-8-sig', errors='replace')
+    names = []
+    for row in csv.reader(io.StringIO(text)):
+        cells = [cell.strip() for cell in row if cell.strip()]
+        if cells:
+            names.append(cells[0])
+    if len(names) == n_channels + 1:
+        names = names[1:]
+
+    try:
+        rename_channels(datasource, names)
+    except ValueError as exc:
+        return jsonify(success=False, error=str(exc)), 400
+
+    data_model.load_datasource(datasource, reload=True)
+    return jsonify(success=True)
 
 @app.route('/get_ome_metadata', methods=['GET'])
 def get_ome_metadata():
@@ -273,16 +295,6 @@ def save_channel_list():
 def get_gating_csv_values():
     datasource = request.args.get('datasource')
     file_path = data_path / datasource / 'uploaded_gates.csv'
-    if file_path.is_file() == False:
-        abort(422)
-    csv = pl.read_csv(file_path)
-    obj = csv.to_dicts()
-    return serialize_and_submit_json(obj)
-
-@app.route('/get_uploaded_channel_csv_values', methods=['GET'])
-def get_channel_csv_values():
-    datasource = request.args.get('datasource')
-    file_path = data_path / datasource / 'uploaded_channels.csv'
     if file_path.is_file() == False:
         abort(422)
     csv = pl.read_csv(file_path)

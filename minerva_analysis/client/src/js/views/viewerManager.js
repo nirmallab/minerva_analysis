@@ -229,7 +229,18 @@ export class ViewerManager {
             // index: 0,
             opacity: 1,
             preload: true,
-            success: () => this.raiseLabelLayer(),
+            // "open" is what wires up the GL colorize pipeline (see imageViewer.js's
+            // initGL, bound to the "open" handler) -- previously only raised from
+            // load_label_image()'s success callback, which never runs for a
+            // datasource with no segmentation (noLabel short-circuits it). That left
+            // image channels fetching real tile bytes successfully but never
+            // getting GL-rendered: tiles loaded, nothing drew. initGL is safe to
+            // run more than once, so raising it here too (redundant when a label
+            // image is also present) is harmless.
+            success: (e) => {
+                this.viewer.raiseEvent("open", e.item);
+                this.raiseLabelLayer();
+            },
         });
 
     }
@@ -310,8 +321,14 @@ export class ViewerManager {
         this.labelLayerRequested = true;
         const self = this;
 
-        // Load label image in background if it exists
-        if (this.imageViewer.config["imageData"][0]["src"] && this.imageViewer.config["imageData"][0]["src"] !== "") {
+        // Load label image in background if it exists. Gate on config.segmentation
+        // (set only when a segmentation file was actually registered), not just
+        // imageData[0].src -- imageData[0] is the label/"Area" channel only when
+        // segmentation exists; otherwise it's just the first real image channel
+        // (e.g. "DNA"), which always has a real src and would be wrongly loaded
+        // as a label layer, silently, with no error to trigger the centroid
+        // fallback below.
+        if (this.imageViewer.config["segmentation"] && this.imageViewer.config["imageData"]?.[0]?.["src"]) {
             let url = this.imageViewer.config["imageData"][0]["src"];
             const { maxLevel, extraZoomLevels } = this.imageViewer.config;
             const magnification = 2 ** extraZoomLevels;

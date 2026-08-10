@@ -62,7 +62,7 @@ class ViewerSidebar {
         if (savedGating && savedGating.length) {
             this.applySavedGating(savedGating);
         } else {
-            this.setGateMarker(this.columns[1] || this.columns[0], { enableSlot: false });
+            this.setGateMarker(this.getGateMarkerNames()[1] || this.getGateMarkerNames()[0], { enableSlot: false });
         }
         this._restoring = false;
 
@@ -130,11 +130,14 @@ class ViewerSidebar {
     }
 
     getGateMarkerNames() {
-        const names = [...this.columns];
-        if (!names.includes("Area") && this.databaseDescription.Area) {
-            names.push("Area");
-        }
-        return names.filter((name) => this.databaseDescription[this.dataLayer.getFullChannelName(name)]);
+        // this.columns is the image channel list -- gate-able markers are
+        // the feature table's own columns (e.g. adata.var_names), which are
+        // frequently a different set of strings entirely. CSVGatingList
+        // already computes exactly that list (see csvGatingList.js's init,
+        // which filters get_datasource_description()'s output to columns
+        // that actually have a 'histogram'), so reuse it here instead of
+        // re-deriving a second, weaker version of the same filter.
+        return [...this.gatingList.columns];
     }
 
     initChannelSlots() {
@@ -275,7 +278,21 @@ class ViewerSidebar {
         this.ensureGateSelection(name);
         this.redrawGateSlider();
         this.drawGateDistribution();
-        if (options.syncSlot !== false) {
+        // Gating always works off the feature-table column (ensureGateSelection
+        // above), independent of the image -- a gate marker is very often not
+        // an image channel at all (adata.var_names vs. the image's channel
+        // names are frequently different strings/lengths). Only mirror the
+        // marker into a rendering slot when its name genuinely matches a real
+        // image channel; otherwise leave the channel section untouched and let
+        // the user find and enable the right channel themselves to verify the
+        // gate visually. this.columns.includes(name) was a no-op bug here --
+        // name always comes from this.columns (the gate marker dropdown), so
+        // it was trivially always true, force-hijacking a channel slot onto
+        // every marker regardless of whether it had real image data. The
+        // correct check is against the image channel vocabulary (imageChannels,
+        // keyed by full channel name -> tile index), not the marker vocabulary.
+        const hasMatchingImageChannel = imageChannels[this.dataLayer.getFullChannelName(name)] !== undefined;
+        if (options.syncSlot !== false && hasMatchingImageChannel) {
             this.setSlotMarker(1, name, { keepColor: true, enable: enableSlot, reveal: enableSlot });
         }
         this.scheduleSaveGating();
@@ -324,7 +341,7 @@ class ViewerSidebar {
 
     setGateRange(values, eventName) {
         const fullName = this.dataLayer.getFullChannelName(this.gateMarker);
-        const normalized = this.normalizeRange(values, this.dataLayer.isTransformed());
+        const normalized = this.normalizeGateRange(values, this.getGateRange(this.gateMarker));
         this.gatingList.gating_channels[fullName] = normalized;
         this.gatingList.selections = {};
         this.gatingList.selections[fullName] = normalized;
@@ -344,8 +361,8 @@ class ViewerSidebar {
         const packet = this.gatingList.hasGatingGMM[this.gateMarker];
         if (!packet || packet.gate === undefined) return;
         const range = this.getGateRange(this.gateMarker);
-        const transformed = this.dataLayer.isTransformed();
-        const gate = transformed ? parseFloat(packet.gate) : Math.floor(parseFloat(packet.gate));
+        const factor = Math.pow(10, this.dataLayer.gateDecimals(range));
+        const gate = Math.floor(parseFloat(packet.gate) * factor) / factor;
         const values = [gate, range[1]];
         if (this.gateSlider) {
             this.gateSlider.silentValue(values);
@@ -764,7 +781,7 @@ class ViewerSidebar {
         });
         const marker = activeRow
             ? this.dataLayer.getShortChannelName(activeRow.channel)
-            : (this.columns[1] || this.columns[0]);
+            : (this.getGateMarkerNames()[1] || this.getGateMarkerNames()[0]);
         // syncSlot:false - applySavedChannels already placed every active channel (including
         // this one, if it was active) in its correct restored slot; letting setGateMarker's
         // normal slot-1 mirroring run here would clobber whatever channel actually belongs there.
@@ -827,7 +844,16 @@ class ViewerSidebar {
 
     persistChannelList() {
         const listChannels = {};
-        this.columns.forEach((name) => {
+        // Must cover every entry map_channels (imageChannelsIdx, all real image
+        // channels) can reference server-side -- NOT this.columns (gating markers
+        // only). A structural/counterstain channel like DNA is commonly a real
+        // image channel with no corresponding feature-table column (no histogram),
+        // so it's excluded from this.columns but still present in imageChannelsIdx;
+        // basing this loop on this.columns left it with no listChannels entry at
+        // all, which the server then KeyErrors on since map_channels expects one
+        // for every image channel. getImageRange(name) already resolves a DNA-like
+        // channel's real image_min/image_max fine -- it just was never called for it.
+        Object.values(imageChannelsIdx).forEach((name) => {
             listChannels[name] = this.channelList.image_channels[name] || this.getImageRange(name);
         });
         const activeChannels = {};
@@ -912,6 +938,17 @@ class ViewerSidebar {
             return sorted;
         }
         return [Math.floor(sorted[0]), Math.ceil(sorted[1])];
+    }
+
+    // Gate-specific rounding: precision is derived from the channel's own
+    // observed range (dataLayer.gateDecimals) instead of the isTransformed
+    // config flag, so it can't silently drift out of sync with the data's
+    // actual scale. Floors the low handle / ceils the high handle (at that
+    // precision) so rounding never excludes boundary cells.
+    normalizeGateRange(values, range) {
+        const sorted = [...values].map((value) => parseFloat(value)).sort((a, b) => a - b);
+        const factor = Math.pow(10, this.dataLayer.gateDecimals(range));
+        return [Math.floor(sorted[0] * factor) / factor, Math.ceil(sorted[1] * factor) / factor];
     }
 
     formatValue(value) {
