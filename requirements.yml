@@ -4,7 +4,6 @@ channels:
 dependencies:
   - appdirs
   - flask
-  - flask-sqlalchemy
   - itsdangerous
   - jinja2
   - matplotlib

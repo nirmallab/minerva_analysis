@@ -1,104 +1,156 @@
-from minerva_analysis import app, db, data_path
-from sqlalchemy.orm import relationship
-from sqlalchemy import func
+from minerva_analysis import data_path
 
-import io
-import numpy as np
 import sqlite3
+import threading
 import time
 
 
-# Via https://stackoverflow.com/questions/2546207/does-sqlalchemy-have-an-equivalent-of-djangos-get-or-create
-def create(model, **kwargs):
-    instance = model(**kwargs)
-    db.session.add(instance)
-    db.session.commit()
-    return instance
-
-
-def get(model, **kwargs):
-    return db.session.query(model).filter_by(**kwargs).one_or_none()
-
-
-def edit(model, id, edit_field, edit_value):
-    instance = get(model, id=id)
-    instance.__setattr__(edit_field, edit_value)
-    db.session.commit()
-
-
-def get_all(model, **kwargs):
-    return db.session.query(model).filter_by(is_deleted=False, **kwargs).order_by(model.id).all()
-
-
-def get_or_create(model, **kwargs):
-    if 'cells' in kwargs:
-        cells = kwargs['cells']
-        del kwargs['cells']
-    instance = db.session.query(model).filter_by(**kwargs).one_or_none()
-    if instance:
-        return instance
-    else:
-        instance = model(cells=cells, **kwargs)
-        db.session.add(instance)
-        db.session.commit()
-        return instance
-
-
-def save_list(model, **kwargs):
-    if 'cells' in kwargs:
-        cells = kwargs['cells']
-        del kwargs['cells']
-
-    instance = db.session.query(model).filter_by(**kwargs).one_or_none()
-    if instance:
-        instance.__setattr__('cells', cells)
-        db.session.commit()
-        return instance
-    else:
-        instance = model(cells=cells, **kwargs)
-        db.session.add(instance)
-        db.session.commit()
-        return instance
-
-
-class ChannelList(db.Model):
+class ChannelList:
     __tablename__ = 'channelList'
-    id = db.Column(db.Integer, primary_key=True)
-    datasource = db.Column(db.String(80), unique=False, nullable=False)
-    cells = db.Column(db.LargeBinary, default={}, nullable=False)
-    is_deleted = db.Column(db.Boolean, default=False, nullable=False)
 
 
-class GatingList(db.Model):
+class GatingList:
     __tablename__ = 'gatinglist'
-    id = db.Column(db.Integer, primary_key=True)
-    datasource = db.Column(db.String(80), unique=False, nullable=False)
-    cells = db.Column(db.LargeBinary, default={}, nullable=False)
-    is_deleted = db.Column(db.Boolean, default=False, nullable=False)
 
 
-def _ensure_healthy_database():
-    """Move a corrupted db.sqlite3 aside so db.create_all() below starts fresh
-    instead of the app crashing on every query against an unreadable file."""
-    db_file = data_path / "db.sqlite3"
+class _Row:
+    __slots__ = ("id", "datasource", "cells", "is_deleted")
+
+    def __init__(self, id, datasource, cells, is_deleted):
+        self.id = id
+        self.datasource = datasource
+        self.cells = cells
+        self.is_deleted = bool(is_deleted)
+
+
+# Table name is always one of the two hardcoded __tablename__ constants above,
+# never user input -- safe to interpolate.
+_SCHEMA = (
+    'CREATE TABLE IF NOT EXISTS "{table}" ('
+    'id INTEGER PRIMARY KEY AUTOINCREMENT, '
+    'datasource TEXT NOT NULL UNIQUE, '
+    'cells BLOB NOT NULL, '
+    'is_deleted INTEGER NOT NULL DEFAULT 0)'
+)
+
+_migration_locks = {}
+_migration_locks_guard = threading.Lock()
+
+
+def _migration_lock_for(datasource_name):
+    with _migration_locks_guard:
+        if datasource_name not in _migration_locks:
+            _migration_locks[datasource_name] = threading.Lock()
+        return _migration_locks[datasource_name]
+
+
+def _db_path_for_datasource(datasource_name):
+    db_dir = data_path / datasource_name
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return db_dir / f"{datasource_name}.db"
+
+
+def _create_tables(conn):
+    conn.execute(_SCHEMA.format(table=ChannelList.__tablename__))
+    conn.execute(_SCHEMA.format(table=GatingList.__tablename__))
+
+
+def _ensure_healthy(db_file):
+    """Reactive recovery only, invoked after an actual sqlite3.DatabaseError --
+    not a proactive integrity_check on every call, since that would add cost
+    to every get/save_list without adding safety (a check that passes right
+    before a query says nothing about corruption from that query's own write)."""
     if not db_file.exists():
         return
+    backup_path = db_file.with_name(f"{db_file.name}.corrupt-{int(time.time())}")
+    print(f"WARNING: {db_file} appears corrupted; moving it to {backup_path} "
+          f"and recreating a fresh database.")
+    db_file.rename(backup_path)
+
+
+def _connect(db_file):
+    conn = sqlite3.connect(str(db_file), timeout=10)
     try:
-        conn = sqlite3.connect(str(db_file))
+        _create_tables(conn)
+    except sqlite3.DatabaseError:
+        # Close the failed connection first -- on Windows, _ensure_healthy's
+        # rename-aside fails with PermissionError while a handle is still open.
+        conn.close()
+        _ensure_healthy(db_file)
+        conn = sqlite3.connect(str(db_file), timeout=10)
+        _create_tables(conn)
+    return conn
+
+
+def _migrate_legacy_row(db_file, datasource_name, table):
+    """Best-effort, one-time: copy this datasource's row out of the old
+    shared data_path/db.sqlite3 into its new per-datasource file. Read-only
+    against the legacy file -- it is never deleted or written to."""
+    legacy_path = data_path / "db.sqlite3"
+    if not legacy_path.exists():
+        return
+    try:
+        legacy_conn = sqlite3.connect(f"file:{legacy_path}?mode=ro", uri=True, timeout=10)
         try:
-            result = conn.execute("PRAGMA integrity_check").fetchone()
+            row = legacy_conn.execute(
+                f'SELECT cells, is_deleted FROM "{table}" WHERE datasource = ? '
+                f'ORDER BY id DESC LIMIT 1', (datasource_name,),
+            ).fetchone()
         finally:
-            conn.close()
-        if not result or result[0] != "ok":
-            raise sqlite3.DatabaseError(f"integrity_check reported: {result}")
-    except sqlite3.DatabaseError as error:
-        backup_path = db_file.with_name(f"db.sqlite3.corrupt-{int(time.time())}")
-        print(f"WARNING: {db_file} failed integrity check ({error}); "
-              f"moving it to {backup_path} and recreating a fresh database.")
-        db_file.rename(backup_path)
+            legacy_conn.close()
+    except sqlite3.DatabaseError:
+        return
+    if row is None:
+        return
+    cells, is_deleted = row
+    conn = sqlite3.connect(str(db_file), timeout=10)
+    try:
+        conn.execute(_SCHEMA.format(table=table))
+        conn.execute(
+            f'INSERT OR IGNORE INTO "{table}" (datasource, cells, is_deleted) '
+            f'VALUES (?, ?, ?)', (datasource_name, cells, is_deleted),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
-_ensure_healthy_database()
+def _prepare(model, datasource_name):
+    db_file = _db_path_for_datasource(datasource_name)
+    if not db_file.exists():
+        with _migration_lock_for(datasource_name):
+            if not db_file.exists():
+                _migrate_legacy_row(db_file, datasource_name, model.__tablename__)
+    return db_file
 
-with app.app_context():
-    db.create_all()
+
+def get(model, datasource):
+    db_file = _prepare(model, datasource)
+    conn = _connect(db_file)
+    try:
+        row = conn.execute(
+            f'SELECT id, datasource, cells, is_deleted FROM "{model.__tablename__}" '
+            f'WHERE datasource = ?', (datasource,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return _Row(*row) if row else None
+
+
+def save_list(model, datasource, cells):
+    db_file = _prepare(model, datasource)
+    conn = _connect(db_file)
+    try:
+        conn.execute(
+            f'INSERT INTO "{model.__tablename__}" (datasource, cells, is_deleted) '
+            f'VALUES (?, ?, 0) ON CONFLICT(datasource) DO UPDATE SET cells = excluded.cells',
+            (datasource, cells),
+        )
+        conn.commit()
+        row = conn.execute(
+            f'SELECT id, datasource, cells, is_deleted FROM "{model.__tablename__}" '
+            f'WHERE datasource = ?', (datasource,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return _Row(*row)

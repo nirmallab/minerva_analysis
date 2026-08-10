@@ -4,7 +4,6 @@ multiprocessing.freeze_support()
 
 from flask import Flask
 from pathlib import Path
-from flask_sqlalchemy import SQLAlchemy
 from appdirs import user_data_dir
 
 from numcodecs import compat_ext  # Needed for pyinstaller
@@ -60,14 +59,11 @@ else:
 data_path.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__, template_folder=Path("client/templates"), static_folder="data")
 app.config["TEMPLATES_AUTO_RELOAD"] = True
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///" + str(data_path) + "/db.sqlite3"
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["CLIENT_PATH"] = app.root_path + "/client/"
 app.config["IS_DOCKER"] = False
 app.config["MINERVA_BASE_URL"] = _clean_base_url(os.environ.get("MINERVA_BASE_URL", ""))
 app.config["MINERVA_NOTEBOOK_MODE"] = os.environ.get("MINERVA_NOTEBOOK_MODE", "").lower() in ("1", "true", "yes")
 config_json_path = data_path / "config.json"
-db = SQLAlchemy(app)
 
 
 @app.after_request

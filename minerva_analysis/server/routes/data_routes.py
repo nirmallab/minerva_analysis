@@ -15,7 +15,6 @@ import orjson
 import threading
 from collections import OrderedDict
 from os import walk
-from flask_sqlalchemy import SQLAlchemy
 
 
 @app.route('/init_database', methods=['GET'])
