@@ -48,12 +48,12 @@ def _wait_until_ready(port, timeout=30):
     raise RuntimeError(f"Minerva Analysis server did not become ready on port {port}")
 
 
-def _server_key(data_dir, base_url):
-    return (str(Path(data_dir).expanduser().resolve()), base_url)
+def _server_key(data_dir, base_url, module):
+    return (str(Path(data_dir).expanduser().resolve()), base_url, module)
 
 
-def _start_server(data_dir, base_url, port=None):
-    key = _server_key(data_dir, base_url)
+def _start_server(data_dir, base_url, port=None, module="gating"):
+    key = _server_key(data_dir, base_url, module)
     existing = _SERVERS.get(key)
     if existing and existing.poll() is None:
         return existing._minerva_port
@@ -73,15 +73,20 @@ def _start_server(data_dir, base_url, port=None):
         "--base-url",
         base_url,
         "--notebook-mode",
+        "--active-module",
+        module,
     ]
     # Real OS env vars must be set before the child's first `import
     # minerva_analysis`, since __init__.py snapshots MINERVA_DATA_PATH /
-    # MINERVA_BASE_URL at import time -- the CLI flags above are consumed by
-    # server_cli.py too late relative to that import.
+    # MINERVA_BASE_URL / MINERVA_ACTIVE_MODULE at import time -- the CLI
+    # flags above are consumed by server_cli.py too late relative to that
+    # import (and, for MINERVA_ACTIVE_MODULE specifically, too late relative
+    # to Blueprint registration, which happens inside that same import).
     env = os.environ.copy()
     env["MINERVA_DATA_PATH"] = resolved_data_dir
     env["MINERVA_BASE_URL"] = base_url
     env["MINERVA_NOTEBOOK_MODE"] = "1"
+    env["MINERVA_ACTIVE_MODULE"] = module
     repo_root = Path(__file__).resolve().parent.parent
     process = subprocess.Popen(cmd, cwd=repo_root, env=env)
     process._minerva_port = port
@@ -108,6 +113,7 @@ class MinervaViewer:
         height=850,
         width="100%",
         base_url=None,
+        module=None,
         start=True,
     ):
         self.datasource = datasource
@@ -116,6 +122,9 @@ class MinervaViewer:
         self.height = height
         self.width = width
         self._jupyter_base_url = _clean_base_url(base_url) if base_url is not None else _jupyter_base_url()
+        # `is None` (not truthy-or) so module="" -- explicitly core-only,
+        # no feature module -- is distinguishable from "not passed".
+        self.module = module if module is not None else os.environ.get("MINERVA_ACTIVE_MODULE", "gating")
         self._port = None
         if start:
             self.start()
@@ -205,7 +214,7 @@ class MinervaViewer:
             return self._port
         port = _free_port()
         base_url = f"{self._jupyter_base_url}proxy/{port}" if self.proxy else ""
-        self._port = _start_server(self.data_dir, base_url, port=port)
+        self._port = _start_server(self.data_dir, base_url, port=port, module=self.module)
         return self._port
 
     @property

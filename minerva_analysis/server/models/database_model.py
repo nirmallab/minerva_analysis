@@ -9,10 +9,6 @@ class ChannelList:
     __tablename__ = 'channelList'
 
 
-class GatingList:
-    __tablename__ = 'gatinglist'
-
-
 class _Row:
     __slots__ = ("id", "datasource", "cells", "is_deleted")
 
@@ -23,8 +19,10 @@ class _Row:
         self.is_deleted = bool(is_deleted)
 
 
-# Table name is always one of the two hardcoded __tablename__ constants above,
-# never user input -- safe to interpolate.
+# Table name always comes from a model class's __tablename__ (ChannelList
+# here, or a feature module's own marker class, e.g. server/modules/gating/
+# database.py's GatingList) -- trusted code, never user input, so safe to
+# interpolate.
 _SCHEMA = (
     'CREATE TABLE IF NOT EXISTS "{table}" ('
     'id INTEGER PRIMARY KEY AUTOINCREMENT, '
@@ -50,9 +48,15 @@ def _db_path_for_datasource(datasource_name):
     return db_dir / f"{datasource_name}.db"
 
 
-def _create_tables(conn):
-    conn.execute(_SCHEMA.format(table=ChannelList.__tablename__))
-    conn.execute(_SCHEMA.format(table=GatingList.__tablename__))
+def _create_table(conn, model):
+    # Only the table for the model actually being get/save_list'd is
+    # created -- not every known model's table eagerly -- so a datasource's
+    # .db file never grows tables for feature modules that aren't installed
+    # in this build. get(SomeOtherModel, ...) on a datasource that's never
+    # used that model still works fine (table gets created empty by that
+    # call's own _connect, then queried, per the isolation test in
+    # tests/test_database_model.py) -- no pre-creation is required.
+    conn.execute(_SCHEMA.format(table=model.__tablename__))
 
 
 def _ensure_healthy(db_file):
@@ -68,17 +72,17 @@ def _ensure_healthy(db_file):
     db_file.rename(backup_path)
 
 
-def _connect(db_file):
+def _connect(db_file, model):
     conn = sqlite3.connect(str(db_file), timeout=10)
     try:
-        _create_tables(conn)
+        _create_table(conn, model)
     except sqlite3.DatabaseError:
         # Close the failed connection first -- on Windows, _ensure_healthy's
         # rename-aside fails with PermissionError while a handle is still open.
         conn.close()
         _ensure_healthy(db_file)
         conn = sqlite3.connect(str(db_file), timeout=10)
-        _create_tables(conn)
+        _create_table(conn, model)
     return conn
 
 
@@ -126,7 +130,7 @@ def _prepare(model, datasource_name):
 
 def get(model, datasource):
     db_file = _prepare(model, datasource)
-    conn = _connect(db_file)
+    conn = _connect(db_file, model)
     try:
         row = conn.execute(
             f'SELECT id, datasource, cells, is_deleted FROM "{model.__tablename__}" '
@@ -139,7 +143,7 @@ def get(model, datasource):
 
 def save_list(model, datasource, cells):
     db_file = _prepare(model, datasource)
-    conn = _connect(db_file)
+    conn = _connect(db_file, model)
     try:
         conn.execute(
             f'INSERT INTO "{model.__tablename__}" (datasource, cells, is_deleted) '

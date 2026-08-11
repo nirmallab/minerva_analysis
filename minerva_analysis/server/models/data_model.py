@@ -197,6 +197,50 @@ def init(datasource_name):
     load_ball_tree(datasource_name)
 
 
+# Read-only accessors onto this module's currently-loaded-datasource state.
+# Feature modules (server/modules/gating, and any future module) should go
+# through these rather than reading data_model.datasource/.config/etc.
+# directly -- same values today, but it keeps module code from depending on
+# this module's private global names surviving a future rewrite (see
+# SKILL.md's "Known Performance Hot Spots" for why that rewrite is a
+# deliberately deferred, separate task, not something to block on here).
+def get_current_datasource_name():
+    return source
+
+
+def get_datasource_df():
+    return datasource
+
+
+def get_current_config():
+    return config
+
+
+def get_current_ball_tree():
+    return ball_tree
+
+
+def get_current_zarray():
+    return zarray
+
+
+def get_current_channels():
+    return channels
+
+
+def gmm_cache_get_or_set(key, compute_fn):
+    """Shared entry point into this module's _gmm_cache for feature modules
+    (e.g. gating's per-selection GMM) that want the same warm/invalidate-on-
+    reload behavior as this module's own GMM caching, without reaching into
+    _gmm_cache directly -- this module keeps sole invalidation authority
+    (load_datasource() clears it on every reload)."""
+    if key in _gmm_cache:
+        return _gmm_cache[key]
+    value = compute_fn()
+    _gmm_cache[key] = value
+    return value
+
+
 def load_datasource(datasource_name, reload=False):
     global datasource
     global source
@@ -243,7 +287,12 @@ def load_datasource(datasource_name, reload=False):
             x_reduce = loaded_zarray.shape[1] // 200
             y_reduce = loaded_zarray.shape[2] // 200
             reduce = np.min([x_reduce, y_reduce])
-            loaded_zarray = block_reduce(loaded_zarray, (1, reduce, reduce), np.mean)
+            # block_reduce needs a real strided numpy array -- loaded_zarray
+            # here is a lazy zarr.Array, which has no .strides. This is
+            # already the smallest pyramid level with both dims >= 200, so
+            # materializing it is bounded regardless of the source image's
+            # full resolution.
+            loaded_zarray = block_reduce(np.asarray(loaded_zarray), (1, reduce, reduce), np.mean)
 
         datasource = loaded_datasource
         seg = loaded_seg
@@ -426,11 +475,14 @@ def get_channel_names(datasource_name, shortnames=True):
     return [channel[key] for channel in real_channels]
 
 
-def _gate_filter_columns(datasource_name, columns):
+def get_filter_columns(datasource_name, columns):
     """Numeric numpy views of the requested columns pulled from the
     already-loaded datasource, cached (one entry at a time, like
-    centroid_tiles._load_filter_table) so repeated gate queries on the same
-    columns reuse the same arrays instead of re-deriving them per request.
+    centroid_tiles._load_filter_table) so repeated range-filter queries on
+    the same columns reuse the same arrays instead of re-deriving them per
+    request. Shared core primitive -- used directly by get_channel_cells
+    below, and by the gating module's own queries (server/modules/gating/
+    model.py) via this same function, not a private copy.
     """
     key = (datasource_name, tuple(sorted(set(columns))))
     cached = _gate_filter_cache.get(key)
@@ -445,7 +497,7 @@ def _gate_filter_columns(datasource_name, columns):
     return cols
 
 
-def _apply_gate_mask(columns, gates, mode='and'):
+def apply_range_mask(columns, gates, mode='and'):
     n = len(next(iter(columns.values()))) if columns else 0
     keep = np.ones(n, dtype=bool) if mode == 'and' else np.zeros(n, dtype=bool)
     for key, value in gates.items():
@@ -460,11 +512,6 @@ def _apply_gate_mask(columns, gates, mode='and'):
     return keep
 
 
-def _records_for_keys(keys, keep):
-    arrays = [datasource[k].to_numpy()[keep].tolist() for k in keys]
-    return [dict(zip(keys, row)) for row in zip(*arrays)]
-
-
 def get_channel_cells(datasource_name, channels):
     global datasource
 
@@ -474,8 +521,8 @@ def get_channel_cells(datasource_name, channels):
         return []
 
     gate_range = (0, 65536)
-    columns = _gate_filter_columns(datasource_name, channels)
-    keep = _apply_gate_mask(columns, {c: gate_range for c in channels}, mode='and')
+    columns = get_filter_columns(datasource_name, channels)
+    keep = apply_range_mask(columns, {c: gate_range for c in channels}, mode='and')
     ids = datasource['id'].to_numpy()[keep].tolist()
     return [{'id': v} for v in ids]
 
@@ -526,34 +573,6 @@ def get_cells_phenotype(datasource_name):
     return query
 
 
-def get_gated_cells(datasource_name, gates, start_keys):
-    global datasource
-
-    _ensure_loaded(datasource_name)
-
-    if not gates:
-        return []
-    columns = _gate_filter_columns(datasource_name, list(gates.keys()))
-    keep = _apply_gate_mask(columns, gates, mode='and')
-    id_key = start_keys[0]
-    values = datasource[id_key].to_numpy()[keep].tolist()
-    return [{id_key: v} for v in values]
-
-
-def get_gated_cells_custom(datasource_name, gates, start_keys):
-    global datasource
-
-    _ensure_loaded(datasource_name)
-
-    if not gates:
-        return []
-    columns = _gate_filter_columns(datasource_name, list(gates.keys()))
-    keep = _apply_gate_mask(columns, gates, mode='or')
-    query_keys = start_keys + list(gates.keys())
-    return _records_for_keys(query_keys, keep)
-
-
-
 def get_all_cells(datasource_name, start_keys, data_type=float):
     global datasource
     global source
@@ -579,150 +598,6 @@ def get_centroid_tiles(datasource_name, level, tiles, gates=None, max_points=Non
     if config is None or datasource_name not in config:
         load_config(datasource_name)
     return centroid_tiles.get_tiles(config, datasource_name, level, tiles, gates or {}, max_points)
-
-
-def download_gating_csv(datasource_name, gates, channels, selection_ids, encoding):
-    global datasource
-    global source
-    global ball_tree
-
-    # Load if not loaded
-    _ensure_loaded(datasource_name)
-
-    # Polars' with_columns always returns a new frame, so (unlike pandas'
-    # in-place .loc mutation) there's no risk to the shared global from
-    # building the per-channel columns below without a defensive .copy().
-    csv = datasource
-
-    columns = []
-    if 'idField' in config[datasource_name]['featureData'][0]:
-        idField = config[datasource_name]['featureData'][0]['idField']
-    else:
-        idField = "CellID"
-    columns.append(idField)
-
-    if selection_ids:
-        datasource_filter = datasource.filter(pl.col(idField).is_in(selection_ids))
-    else:
-        datasource_filter = datasource
-
-    expr = None
-    for key, value in gates.items():
-        columns.append(key)
-        cond = (pl.col(key) > value[0]) & (pl.col(key) < value[1])
-        expr = cond if expr is None else (expr & cond)
-    if expr is not None:
-        ids = datasource_filter.filter(expr)['id'].to_numpy()
-    else:
-        # No gates set: no filter, nothing gated in. (pandas' .query('')
-        # used to raise ValueError here -- fixed rather than preserved.)
-        ids = np.array([], dtype=np.int64)
-
-    if 'Area' in channels:
-        del channels['Area']
-    is_in_ids = pl.col('id').is_in(ids)
-    for channel in channels:
-        if channel in gates:
-            # Cast to the original column's dtype for CSV-text parity with
-            # the pandas version: csv.loc[mask, channel] = 1 silently
-            # upcast an int literal into what's typically a float64 marker
-            # column (rendering "1.0"), whereas a bare Polars int literal
-            # would render "1" -- a real text diff in the exported CSV.
-            dtype = csv.schema[channel]
-            if encoding == 'binary':
-                value_expr = pl.when(is_in_ids).then(pl.lit(1)).otherwise(pl.lit(0)).cast(dtype)
-            else:
-                value_expr = pl.when(is_in_ids).then(pl.col(channel)).otherwise(pl.lit(0).cast(dtype))
-            csv = csv.with_columns(value_expr.alias(channel))
-        else:
-            csv = csv.with_columns(pl.lit(0).alias(channel))
-
-    return csv
-
-
-def download_gates(datasource_name, gates, channels, lassos):
-    global datasource
-    global source
-    global ball_tree
-
-    # Load if not loaded
-    _ensure_loaded(datasource_name)
-    rows = []
-    for key, value in channels.items():
-        rows.append([key, value[0], value[1]])
-    csv = pl.DataFrame(rows, schema=['channel', 'gate_start', 'gate_end'], orient='row')
-    csv = csv.with_columns(pl.lit(False).alias('gate_active'))
-
-    schema = csv.schema
-    for channel in gates:
-        is_channel = pl.col('channel') == channel
-        csv = csv.with_columns([
-            pl.when(is_channel).then(pl.lit(True)).otherwise(pl.col('gate_active')).alias('gate_active'),
-            pl.when(is_channel).then(pl.lit(gates[channel][0]).cast(schema['gate_start']))
-              .otherwise(pl.col('gate_start')).alias('gate_start'),
-            pl.when(is_channel).then(pl.lit(gates[channel][1]).cast(schema['gate_end']))
-              .otherwise(pl.col('gate_end')).alias('gate_end'),
-        ])
-
-    if len(lassos) > 0:
-        # Confirmed dead in current live usage (imageViewer.js permanently
-        # sets list_lassos = {} since lasso drawing was removed), but
-        # implemented correctly rather than skipped. lasso_polygon is a
-        # nested structure that won't unify with the float gate columns
-        # above, so build it as its own frame and concat with relaxed
-        # schema-widening instead of forcing one shared schema up front.
-        lasso_rows = [
-            {'channel': 'Lasso', 'gate_start': v['lasso_polygon'], 'gate_end': None, 'gate_active': v['lasso_toggle']}
-            for v in lassos.values()
-        ]
-        lasso_df = pl.DataFrame(lasso_rows, strict=False)
-        csv = pl.concat([csv, lasso_df], how='diagonal_relaxed')
-
-    return csv
-
-
-def save_gating_list(datasource_name, gates, channels, lassos):
-    global datasource
-    global source
-    global ball_tree
-
-    # Load if not loaded
-    _ensure_loaded(datasource_name)
-    rows = []
-    for key, value in channels.items():
-        rows.append([key, value[0], value[1]])
-    csv = pl.DataFrame(rows, schema=['channel', 'gate_start', 'gate_end'], orient='row')
-    csv = csv.with_columns(pl.lit(False).alias('gate_active'))
-
-    schema = csv.schema
-    for channel in gates:
-        is_channel = pl.col('channel') == channel
-        csv = csv.with_columns([
-            pl.when(is_channel).then(pl.lit(True)).otherwise(pl.col('gate_active')).alias('gate_active'),
-            pl.when(is_channel).then(pl.lit(gates[channel][0]).cast(schema['gate_start']))
-              .otherwise(pl.col('gate_start')).alias('gate_start'),
-            pl.when(is_channel).then(pl.lit(gates[channel][1]).cast(schema['gate_end']))
-              .otherwise(pl.col('gate_end')).alias('gate_end'),
-        ])
-
-    if len(lassos) > 0:
-        lasso_rows = [
-            {'channel': 'Lasso', 'gate_start': v['lasso_polygon'], 'gate_end': None, 'gate_active': v['lasso_toggle']}
-            for v in lassos.values()
-        ]
-        lasso_df = pl.DataFrame(lasso_rows, strict=False)
-        csv = pl.concat([csv, lasso_df], how='diagonal_relaxed')
-
-    temp = csv.to_dicts()
-    f = pickle.dumps(temp, protocol=4)
-    database_model.save_list(database_model.GatingList, datasource=datasource_name, cells=f)
-
-
-def get_saved_gating_list(datasource_name):
-    gating_list = database_model.get(database_model.GatingList, datasource=datasource_name)
-    if gating_list is None:
-        return None
-    return pickle.loads(gating_list.cells)
 
 
 def download_channels(datasource_name, map_channels, active_channels, list_colors, list_ranges, list_channels):
@@ -976,81 +851,6 @@ def get_channel_gmm(channel_name, datasource_name):
     packet_gmm['image_gmm_1'] = dat_gmm1
     packet_gmm['image_gmm_2'] = dat_gmm2
     packet_gmm['image_gmm_3'] = dat_gmm3
-
-    _gmm_cache[cache_key] = packet_gmm
-    return packet_gmm
-
-
-def get_gating_gmm(channel_name, datasource_name, selection_ids):
-    global datasource
-    global source
-    global ball_tree
-    global config
-
-    # Load if not loaded
-    _ensure_loaded(datasource_name)
-
-    selection_key = tuple(sorted(selection_ids)) if selection_ids else None
-    cache_key = (datasource_name, channel_name, selection_key)
-    if cache_key in _gmm_cache:
-        return _gmm_cache[cache_key]
-
-    packet_gmm = {}
-
-    if 'idField' in config[datasource_name]['featureData'][0]:
-        idField = config[datasource_name]['featureData'][0]['idField']
-    else:
-        idField = "CellID"
-    if selection_ids:
-        datasource_filter = datasource.filter(pl.col(idField).is_in(selection_ids))
-    else:
-        # No selection to filter by (the only case current callers use,
-        # since lasso/spatial-selection was removed) -- avoid a full
-        # 2M-row copy that's immediately discarded.
-        datasource_filter = datasource
-
-    column_data = datasource[channel_name].to_numpy()
-    [hist, bin_edges] = np.histogram(column_data[~np.isnan(column_data)], bins=50, density=True)
-    midpoints = (bin_edges[1:] + bin_edges[:-1]) / 2
-
-    column_data_filtered = datasource_filter[channel_name].to_numpy()
-
-    # Cap the GMM fit input at a random subsample when the cell-level column
-    # is large -- EM cost scales roughly linearly with N per iteration, and
-    # a 2-component 1D mixture's fitted parameters barely move between 100k
-    # and millions of samples. Fixed seed keeps the fit deterministic per
-    # unique _gmm_cache key. The histogram above is intentionally left
-    # unaffected -- only the .fit() input is capped. get_channel_gmm (image
-    # pixel data, already ~40k points after block_reduce) is not capped.
-    GMM_FIT_SAMPLE_CAP = 100_000
-    fit_data = column_data_filtered
-    if fit_data.shape[0] > GMM_FIT_SAMPLE_CAP:
-        rng = np.random.default_rng(0)
-        fit_data = fit_data[rng.choice(fit_data.shape[0], size=GMM_FIT_SAMPLE_CAP, replace=False)]
-
-    gmm = GaussianMixture(n_components=2)
-    gmm.fit(fit_data.reshape((-1, 1)))
-    i0, i1 = np.argsort(gmm.means_[:, 0])
-    packet_gmm['gate'] = np.mean(gmm.means_)
-
-    pdf_gmm1 = [gmm.weights_[i0] * norm.pdf(midpoints, gmm.means_[i0], np.sqrt(gmm.covariances_[i0]))][0][0]
-    pdf_gmm2 = [gmm.weights_[i1] * norm.pdf(midpoints, gmm.means_[i1], np.sqrt(gmm.covariances_[i1]))][0][0]
-
-    dat_gmm1 = []
-    dat_gmm2 = []
-    for i in range(len(hist)):
-        obj1 = {}
-        obj1['x'] = midpoints[i]
-        obj1['y'] = pdf_gmm1[i]
-        dat_gmm1.append(obj1)
-
-        obj2 = {}
-        obj2['x'] = midpoints[i]
-        obj2['y'] = pdf_gmm2[i]
-        dat_gmm2.append(obj2)
-
-    packet_gmm['gmm_1'] = dat_gmm1
-    packet_gmm['gmm_2'] = dat_gmm2
 
     _gmm_cache[cache_key] = packet_gmm
     return packet_gmm

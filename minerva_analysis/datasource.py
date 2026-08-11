@@ -51,6 +51,59 @@ def _segmentation_channel_name(segmentation_path):
     return channel_name
 
 
+def _derive_dataset_name_from_path(path):
+    """Server-side mirror of importFormValidation.js's deriveDatasetName() --
+    kept in sync deliberately (same suffix vocabulary) so a quick-viewed file
+    and a full-wizard import of the same file suggest the same base name."""
+    stem = Path(path).name
+    return re.sub(
+        r"\.(ome\.tiff|ome\.tif|ome\.zarr|tiff|tif|svs|zarr|png|jpg|jpeg|qptiff)$",
+        "",
+        stem,
+        flags=re.IGNORECASE,
+    )
+
+
+def _dedupe_dataset_name(base_name, existing_names):
+    """Suffix base_name with _2, _3, ... until it doesn't collide with any of
+    existing_names -- callers pass get_config_names() in."""
+    existing = set(existing_names)
+    if base_name not in existing:
+        return base_name
+    i = 2
+    while f"{base_name}_{i}" in existing:
+        i += 1
+    return f"{base_name}_{i}"
+
+
+def _sniff_quick_view_kind(path):
+    """Classify a dropped/browsed file as 'ome_tiff' (goes through the full
+    multi-channel zarr/tile pipeline) or 'rgb' (flat single-image display,
+    no channels) purely by extension, with a PIL-based content sniff on the
+    RGB branch as a guard against a mislabeled file. Raises ValueError for
+    anything else -- quick view has no format-detection fallback."""
+    suffix = Path(path).suffix.lower()
+    if suffix in (".tif", ".tiff"):
+        return "ome_tiff"
+    if suffix in (".png", ".jpg", ".jpeg"):
+        from PIL import Image
+        with Image.open(path) as img:
+            img.verify()
+        return "rgb"
+    raise ValueError(f"Unsupported file type for quick view: {suffix or path}")
+
+
+def _write_stub_point_csv(csv_path, width, height):
+    """A 1-row X/Y feature table, placed at the image center. Lets a
+    quick-view datasource (registered with no real feature table) flow
+    through the existing CsvAdapter/ball-tree code entirely unmodified --
+    those need a real file to stat() and at least one point to index.
+    No 'id' column here -- CsvAdapter.load_table() always synthesizes its
+    own positional 'id' column via with_row_index('id'), which collides
+    (DuplicateError) with a same-named column already in the source CSV."""
+    pl.DataFrame({"X": [width / 2], "Y": [height / 2]}).write_csv(csv_path)
+
+
 def rename_channels(name, channel_names, data_dir=None):
     """Rename an already-registered datasource's image channels in place --
     used by the viewer's channel-names CSV upload to fix gating/channel
@@ -84,6 +137,38 @@ def rename_channels(name, channel_names, data_dir=None):
     return config[name]
 
 
+def _channel_names_from_ome_xml(image_path, n_channels):
+    """Channel names embedded in the image's own OME-XML metadata, if
+    present and if the count matches -- returns None otherwise. Shared by
+    derive_anndata_channel_names (tier 2 there) and derive_image_channel_names
+    (tier 2 here); a pure extraction, same tifffile/ome_types read as before."""
+    import tifffile as tf
+    from ome_types import from_xml
+
+    try:
+        with tf.TiffFile(str(image_path), is_ome=False) as tiff:
+            xml = tiff.pages[0].tags['ImageDescription'].value
+        ome_channels = from_xml(xml).images[0].pixels.channels
+        ome_names = [c.name for c in ome_channels]
+        if len(ome_names) == n_channels and all(ome_names):
+            return [str(n) for n in ome_names]
+    except Exception:
+        pass
+    return None
+
+
+def derive_image_channel_names(image_path, n_channels):
+    """Resolve display names for a quick-view (no feature table) image:
+    OME-XML channel names if present and complete, else generic "Channel N".
+    Same tier-2/tier-4 logic as derive_anndata_channel_names, minus the
+    var_names/all_markers tiers that only make sense with an AnnData table.
+    """
+    ome_names = _channel_names_from_ome_xml(image_path, n_channels)
+    if ome_names is not None:
+        return ome_names, "image metadata"
+    return [f"Channel {i + 1}" for i in range(n_channels)], "generic"
+
+
 def derive_anndata_channel_names(image_path, features_path, n_channels):
     """Resolve a display name for every image channel, trying progressively
     less-authoritative sources in order and only accepting one that accounts
@@ -115,8 +200,6 @@ def derive_anndata_channel_names(image_path, features_path, n_channels):
     and image channels may still require renaming channels (e.g. via the
     channel-list CSV upload in the viewer) or manual matching there.
     """
-    import tifffile as tf
-    from ome_types import from_xml
     import anndata as ad
     from minerva_analysis.server.models.adapters.anndata_adapter import _deduplicate_names
 
@@ -126,15 +209,9 @@ def derive_anndata_channel_names(image_path, features_path, n_channels):
         if len(var_names) == n_channels:
             return var_names, "adata.var_names"
 
-        try:
-            with tf.TiffFile(str(image_path), is_ome=False) as tiff:
-                xml = tiff.pages[0].tags['ImageDescription'].value
-            ome_channels = from_xml(xml).images[0].pixels.channels
-            ome_names = [c.name for c in ome_channels]
-            if len(ome_names) == n_channels and all(ome_names):
-                return [str(n) for n in ome_names], "image metadata"
-        except Exception:
-            pass
+        ome_names = _channel_names_from_ome_xml(image_path, n_channels)
+        if ome_names is not None:
+            return ome_names, "image metadata"
 
         all_markers = adata.uns.get('all_markers')
         if all_markers is not None:
@@ -441,6 +518,152 @@ def register_anndata_datasource(
         "tileHeight": channel_info["tileHeight"],
         "tileWidth": channel_info["tileWidth"],
         "segmentation": label_info["segmentation"] if label_info else None,
+        "channelFile": str(image_path),
+    }
+
+    with config_path.open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=4)
+
+    return config[name]
+
+
+def register_image_datasource(name, image, channel_names=None, copy=False, data_dir=None):
+    """Register a datasource from just an OME-TIFF/TIFF image -- no feature
+    table, no segmentation. Used by the quick-view landing page for a fast
+    first look. A synthetic 1-row feature table (_write_stub_point_csv) is
+    written so this flows through the existing CsvAdapter/ball-tree code
+    completely unmodified, same as every other datasource; the viewer's
+    channel-list/histogram/GMM code already tolerates image channels with no
+    matching feature column (see data_model.get_datasource_description).
+    """
+    from minerva_analysis import config_json_path, data_path
+    from minerva_analysis.server.models import data_model
+
+    data_root = Path(data_dir).expanduser().resolve() if data_dir else data_path
+    dataset_dir = data_root / name
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    config_path = data_root / "config.json"
+    if not config_path.exists():
+        config_path.write_text("{}", encoding="utf-8")
+
+    image_path = _copy_if_requested(image, dataset_dir, copy)
+
+    channel_info = data_model.convertOmeTiff(image_path, isLabelImg=False)
+    n_channels = channel_info["num_channels"]
+    if channel_names is None:
+        channel_names, _ = derive_image_channel_names(image_path, n_channels)
+    elif len(channel_names) != n_channels:
+        raise ValueError(
+            f"channel_names has {len(channel_names)} entries but the image has {n_channels} channels."
+        )
+
+    stub_csv_path = dataset_dir / "quick_view_points.csv"
+    _write_stub_point_csv(stub_csv_path, channel_info["width"], channel_info["height"])
+    feature_data = {
+        "src": str(stub_csv_path),
+        "normalization": "none",
+        "isTransformed": False,
+        "xCoordinate": "X",
+        "yCoordinate": "Y",
+        # Points at CsvAdapter's own synthesized positional 'id' column
+        # (with_row_index('id')), not a column in the stub CSV itself --
+        # the stub CSV deliberately has no 'id' column of its own (see
+        # _write_stub_point_csv) to avoid colliding with that synthesized
+        # one. Left unset entirely, numericData.js's fetchCells() would
+        # destructure config.featureData[0].idField as undefined and send
+        # an empty column name to /get_all_cells, which 500s server-side.
+        "idField": "id",
+    }
+
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+
+    generated_channel_names = channel_info["channel_names"]
+    image_data = []
+    for idx in range(n_channels):
+        display_name = str(channel_names[idx])
+        image_data.append(
+            {
+                "name": display_name,
+                "fullname": display_name,
+                "src": f"/generated/data/{name}/{generated_channel_names[idx]}/",
+            }
+        )
+
+    config[name] = {
+        "shapes": "",
+        "activeChannel": "",
+        "image_kind": "ome_tiff",
+        "featureData": [feature_data],
+        "imageData": image_data,
+        "height": channel_info["height"],
+        "width": channel_info["width"],
+        "maxLevel": channel_info["maxLevel"],
+        "num_channels": channel_info["num_channels"],
+        "tileHeight": channel_info["tileHeight"],
+        "tileWidth": channel_info["tileWidth"],
+        "segmentation": None,
+        "channelFile": str(image_path),
+    }
+
+    with config_path.open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=4)
+
+    return config[name]
+
+
+def register_rgb_datasource(name, image, copy=False, data_dir=None):
+    """Register a datasource from a flat RGB image (PNG/JPEG) -- the
+    minimal quick-view path: view-only, no channels, no gating. Displayed
+    client-side via OpenSeadragon's native single-image tile source (see
+    RgbImageViewer), served whole by GET /generated/rgb/<name>, not tiled.
+    """
+    from PIL import Image
+
+    from minerva_analysis import config_json_path, data_path
+
+    data_root = Path(data_dir).expanduser().resolve() if data_dir else data_path
+    dataset_dir = data_root / name
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    config_path = data_root / "config.json"
+    if not config_path.exists():
+        config_path.write_text("{}", encoding="utf-8")
+
+    image_path = _copy_if_requested(image, dataset_dir, copy)
+    with Image.open(image_path) as img:
+        width, height = img.size
+
+    stub_csv_path = dataset_dir / "quick_view_points.csv"
+    _write_stub_point_csv(stub_csv_path, width, height)
+    feature_data = {
+        "src": str(stub_csv_path),
+        "normalization": "none",
+        "isTransformed": False,
+        "xCoordinate": "X",
+        "yCoordinate": "Y",
+        # Points at CsvAdapter's own synthesized positional 'id' column
+        # (with_row_index('id')), not a column in the stub CSV itself --
+        # the stub CSV deliberately has no 'id' column of its own (see
+        # _write_stub_point_csv) to avoid colliding with that synthesized
+        # one. Left unset entirely, numericData.js's fetchCells() would
+        # destructure config.featureData[0].idField as undefined and send
+        # an empty column name to /get_all_cells, which 500s server-side.
+        "idField": "id",
+    }
+
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+
+    config[name] = {
+        "shapes": "",
+        "activeChannel": "",
+        "image_kind": "rgb",
+        "featureData": [feature_data],
+        "imageData": [],
+        "height": height,
+        "width": width,
+        "num_channels": 0,
+        "segmentation": None,
         "channelFile": str(image_path),
     }
 

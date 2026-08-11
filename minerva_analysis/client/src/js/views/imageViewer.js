@@ -24,7 +24,10 @@ class ImageViewer {
         this.ready = false;
         this.config = config;
         this.dataLayer = dataLayer;
-        this.gatingList = null;
+        // Optional add-on module hook: { getSelectedIds(filter), supportsColorCoding(),
+        // getColorCodedRanges(), eval_mode } -- see init() and the modeFlags/
+        // colorCodedKeys/colorCodedRanges getters below. Null when no module is active.
+        this.selectionProvider = null;
         this.channelList = null;
         this.imgMetadata = imgMetadata;
         this.numericData = numericData;
@@ -625,16 +628,18 @@ class ImageViewer {
     }
 
     /**
-     * @function init - initializes OSD channel and gating options
+     * @function init - initializes OSD channel and selection-provider options
      * @param viewerManager - Viewer Manager Instance
      * @param channelList - ChannelList instance
-     * @param gatingList - CSVGatingList instance
+     * @param selectionProvider - optional active module instance implementing
+     *   { getSelectedIds(filter), supportsColorCoding(), getColorCodedRanges() } --
+     *   e.g. CSVGatingList. Null when no add-on module is active.
      * @param centers - List of image pixel coordinates per cell
      * @param ids - List of integer ids per cell
      */
-    async init(viewerManager, channelList, gatingList, centers, ids) {
+    async init(viewerManager, channelList, selectionProvider, centers, ids) {
         this.channelList = channelList;
-        this.gatingList = gatingList;
+        this.selectionProvider = selectionProvider || null;
         this.centers = centers || [];
         this.ids = ids || [];
         // Instantiate viewer managers
@@ -769,27 +774,36 @@ class ImageViewer {
     get modeFlags() {
         return {
             edge: !!this.viewerManagerVMain?.sel_outlines,
-            or: this.gatingList?.eval_mode == "or",
+            or: this.selectionProvider?.supportsColorCoding?.() ? this.selectionProvider.eval_mode == "or" : false,
         };
     }
 
     /**
-     * Gating Keys for webGL rendering.
+     * Color-coded (multi-range gate) keys for webGL rendering. Empty unless
+     * the active selection provider supports color coding (see the scope
+     * note on colorCodedRanges below) -- kept gating-owned by design, not a
+     * generalized concept every add-on module needs to implement.
      *
      * @type {Array}
      */
-    get gatingKeys() {
-        const keys = Object.keys(this.gatingSelections);
+    get colorCodedKeys() {
+        const keys = Object.keys(this.colorCodedRanges);
         return [...keys.sort()];
     }
 
     /**
-     * Gating selections.
+     * Color-coded (multi-range gate) selections. This is deliberately not a
+     * generalized "selection" concept -- it's the gating module's per-channel
+     * threshold-range rendering path (u_gating_shape/texture_gatings), only
+     * ever populated when the active provider opts in via supportsColorCoding().
      *
      * @type {Array}
      */
-    get gatingSelections() {
-        return this.gatingList?.selections || {};
+    get colorCodedRanges() {
+        if (!this.selectionProvider?.supportsColorCoding?.()) {
+            return {};
+        }
+        return this.selectionProvider.getColorCodedRanges?.() || {};
     }
 
     /**
@@ -869,7 +883,7 @@ class ImageViewer {
      * @function loadBuffers - loads segmentation mask data to WebGL
      */
     async loadBuffers() {
-        const keys = this.gatingKeys;
+        const keys = this.colorCodedKeys;
         const gatingLists = this.selectGatings(keys);
         const changes = this.updateCache(keys, gatingLists);
         const { markersChanged, gatingChanged } = changes;
@@ -954,7 +968,7 @@ class ImageViewer {
         const magnitude_2iv = this.toTextureShape(via.gl, this.idCount);
         const markerSamples = [0, 1, 2, 3].map((i) => {
             const label = via._markerTextures[i];
-            return this.gatingKeys.indexOf(label);
+            return this.colorCodedKeys.indexOf(label);
         });
         return {
             pie_radius_1f: 8.5,
@@ -962,7 +976,7 @@ class ImageViewer {
             id_end_1i: Math.max(lastId, 0),
             picked_end_1i: Math.max(lastPick, -1),
             modes_2i: [modes.edge, modes.or],
-            key_end_1i: this.gatingKeys.length,
+            key_end_1i: this.colorCodedKeys.length,
             marker_sample_4iv: markerSamples,
             tile_scale_1f: Math.max(relativeImageScale, 1.0),
             tile_fraction_1f: Math.min(relativeImageScale, 1.0),
@@ -979,7 +993,7 @@ class ImageViewer {
      */
     selectGatings(keys) {
         const gatingLists = [];
-        const selections = this.gatingSelections;
+        const selections = this.colorCodedRanges;
         for (const key of keys) {
             const range = selections[key].map((x) => parseFloat(x));
             const color = this.selectMaskColor(key);
@@ -1399,13 +1413,12 @@ class ImageViewer {
             this.centroidTileRequest += 1;
         }
         if (this.centroidMode === "legacy") {
-            const { idField } = this.config.featureData[0];
-            this.dataLayer.getGatedCellIds(this.centroidFilter, [idField]).then((items) => {
-                if (!items || !items.length) {
-                    this.centroidIdSet = this.centroidFilter && Object.keys(this.centroidFilter).length ? new Set() : null;
-                } else {
-                    this.centroidIdSet = new Set(items.map((item) => Number(item[idField] ?? item.id ?? item.CellID)));
-                }
+            const hasFilter = !!(this.centroidFilter && Object.keys(this.centroidFilter).length);
+            const idsPromise = (hasFilter && this.selectionProvider)
+                ? this.selectionProvider.getSelectedIds(this.centroidFilter)
+                : Promise.resolve(null);
+            idsPromise.then((ids) => {
+                this.centroidIdSet = hasFilter ? (ids instanceof Set ? ids : new Set()) : null;
                 this.refreshCentroidOverlay();
             });
             return;
@@ -1660,19 +1673,12 @@ class ImageViewer {
         }
         try {
             await this.ensureSegmentationReady(false);
-            if (!hasGates) {
+            if (!hasGates || !this.selectionProvider) {
                 this.segmentationFilterIds = null;
             } else {
-                const { idField } = this.config.featureData[0];
-                const rows = await this.dataLayer.getGatedCellIds(gates, [idField]);
+                const ids = await this.selectionProvider.getSelectedIds(gates);
                 if (requestId !== this.segmentationFilterRequest) return;
-                if (!Array.isArray(rows)) {
-                    this.segmentationFilterIds = null;
-                } else {
-                    this.segmentationFilterIds = new Set(rows.map((row) => {
-                    return Number(row[idField] ?? row.id ?? row.CellID);
-                    }));
-                }
+                this.segmentationFilterIds = ids instanceof Set ? ids : null;
             }
             this.rerenderSegmentationTiles();
             this.viewer.forceRedraw();

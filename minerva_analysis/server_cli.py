@@ -9,6 +9,7 @@ def main(argv=None):
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--notebook-mode", action="store_true")
+    parser.add_argument("--active-module", default=None)
     args = parser.parse_args(argv)
 
     if args.data_dir:
@@ -17,6 +18,8 @@ def main(argv=None):
         os.environ["MINERVA_BASE_URL"] = args.base_url
     if args.notebook_mode:
         os.environ["MINERVA_NOTEBOOK_MODE"] = "1"
+    if args.active_module is not None:
+        os.environ["MINERVA_ACTIVE_MODULE"] = args.active_module
 
     from waitress import serve
     from minerva_analysis import app, _clean_base_url
@@ -24,6 +27,11 @@ def main(argv=None):
     app.config["MINERVA_NOTEBOOK_MODE"] = args.notebook_mode or app.config.get("MINERVA_NOTEBOOK_MODE", False)
     if args.base_url is not None:
         app.config["MINERVA_BASE_URL"] = _clean_base_url(args.base_url)
+    # Module registration (Blueprint mounting) already happened inside
+    # create_app() at the `from minerva_analysis import app` line above,
+    # keyed off the MINERVA_ACTIVE_MODULE env var set above -- unlike
+    # MINERVA_BASE_URL/MINERVA_NOTEBOOK_MODE, there's no post-import
+    # app.config override that could retroactively register a Blueprint.
     print(f"Serving Minerva Analysis on {args.host}:{args.port}")
     serve(
         app,

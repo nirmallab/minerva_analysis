@@ -57,23 +57,63 @@ else:
 # print('Data Path', str(data_path), str((data_path).resolve()))
 # Make the Data Path
 data_path.mkdir(parents=True, exist_ok=True)
-app = Flask(__name__, template_folder=Path("client/templates"), static_folder="data")
-app.config["TEMPLATES_AUTO_RELOAD"] = True
-app.config["CLIENT_PATH"] = app.root_path + "/client/"
-app.config["IS_DOCKER"] = False
-app.config["MINERVA_BASE_URL"] = _clean_base_url(os.environ.get("MINERVA_BASE_URL", ""))
-app.config["MINERVA_NOTEBOOK_MODE"] = os.environ.get("MINERVA_NOTEBOOK_MODE", "").lower() in ("1", "true", "yes")
 config_json_path = data_path / "config.json"
 
+app = None
 
-@app.after_request
-def add_notebook_headers(response):
-    # X-Frame-Options: SAMEORIGIN would block the direct (non-proxy) notebook
-    # iframe flow, since the sidecar server (127.0.0.1:<port>) is always a
-    # different origin than the Jupyter page embedding it. The sidecar only
-    # binds to 127.0.0.1, so omitting the header does not expose it to the
-    # network.
-    return response
+
+def create_app(active_module=None):
+    """Build the Flask app, then register the core routes plus whichever
+    single feature module (gating today; roi or others in future) is
+    active for this process.
+
+    `global app` is assigned immediately after constructing Flask(...) --
+    before the route-module imports below -- because those modules do
+    `from minerva_analysis import app` themselves; if the module-level
+    `app` attribute didn't exist yet at that point (e.g. only assigned via
+    `app = create_app()` after this function returns), that import would
+    fail on a partially-initialized package.
+
+    In practice this is called exactly once, at import time, at the bottom
+    of this file -- it's a factory (rather than a bare module-level
+    Flask()) only so an active module can be chosen before route
+    registration happens.
+    """
+    global app
+    app = Flask(__name__, template_folder=Path("client/templates"), static_folder="data")
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.config["CLIENT_PATH"] = app.root_path + "/client/"
+    app.config["IS_DOCKER"] = False
+    app.config["MINERVA_BASE_URL"] = _clean_base_url(os.environ.get("MINERVA_BASE_URL", ""))
+    app.config["MINERVA_NOTEBOOK_MODE"] = os.environ.get("MINERVA_NOTEBOOK_MODE", "").lower() in ("1", "true", "yes")
+    # `is None` (not a truthy check) so an explicit active_module="" -- "no
+    # module, core only" -- is distinguishable from "not passed, use the
+    # env var/default". A truthy-or here would silently treat an explicit
+    # empty string the same as "not provided" and fall back to "gating",
+    # making a core-only build unrequestable.
+    if active_module is None:
+        active_module = os.environ.get("MINERVA_ACTIVE_MODULE", "gating")
+    app.config["MINERVA_ACTIVE_MODULE"] = active_module
+
+    @app.after_request
+    def add_notebook_headers(response):
+        # X-Frame-Options: SAMEORIGIN would block the direct (non-proxy) notebook
+        # iframe flow, since the sidecar server (127.0.0.1:<port>) is always a
+        # different origin than the Jupyter page embedding it. The sidecar only
+        # binds to 127.0.0.1, so omitting the header does not expose it to the
+        # network.
+        return response
+
+    # Imported here (not at module top) purely for their route-registration
+    # side effects -- see the docstring above for why `app` must already be
+    # assigned by this point.
+    from minerva_analysis.server.routes import page_routes, data_routes, import_routes, datasource_config_routes, quick_view_routes
+    from minerva_analysis.server.models import data_model, database_model
+    from minerva_analysis.server.modules.registry import register_active_module
+
+    register_active_module(app, app.config["MINERVA_ACTIVE_MODULE"])
+
+    return app
 
 
 def get_config():
@@ -98,5 +138,4 @@ def get_config_names():
         return []
 
 
-from minerva_analysis.server.routes import page_routes, data_routes, import_routes, datasource_config_routes
-from minerva_analysis.server.models import data_model, database_model
+app = create_app()

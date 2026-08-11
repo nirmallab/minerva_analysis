@@ -39,6 +39,16 @@ window.__minervaAnalysisReady = d3.json(`${minervaUrl("config")}?t=${Date.now()}
  * @param conf - The configuration json file
  */
 async function init(config) {
+    // Flat RGB quick-view datasource (no channels, no gating, no feature
+    // table worth loading) -- hand off to the minimal pan/zoom-only viewer
+    // and skip DataLayer/ChannelList/ViewerSidebar/module setup entirely.
+    if (config.image_kind === "rgb") {
+        const rgbViewer = new RgbImageViewer(config);
+        __minervaAnalysis.seaDragonViewer = rgbViewer;
+        await rgbViewer.init();
+        return;
+    }
+
     //maximum selections
     config.maxSelections = 4;
     config.extraZoomLevels = 0;
@@ -71,11 +81,17 @@ async function init(config) {
 
     //Create channel panels
     channelList = new ChannelList(config, columns, dataLayer, eventHandler);
-    csv_gatingList = new CSVGatingList(config, columns, dataLayer, eventHandler);
-    __minervaAnalysis.csv_gatingList = csv_gatingList;
     __minervaAnalysis.channelList = channelList;
     __minervaAnalysis.dataLayer = dataLayer;
-    
+
+    // Active add-on module (gating today; 0 or 1 entries in practice, since only the
+    // active module's scripts are ever loaded -- see appModules.js/base.html).
+    const activeModuleDef = AppModules.registry[0] || null;
+    const activeModuleInstance = activeModuleDef?.createInstance
+        ? activeModuleDef.createInstance({ config, columns, dataLayer, eventHandler })
+        : null;
+    csv_gatingList = activeModuleInstance;
+    __minervaAnalysis.csv_gatingList = csv_gatingList;
 
     //Create image viewer
     const imageArgs = [imgMetadata, numericData, eventHandler];
@@ -86,7 +102,7 @@ async function init(config) {
     //Initialize with database description
     const dd = await dataLayer.getDatabaseDescription();
     channelList.init(dd);
-    csv_gatingList.init(dd, seaDragonViewer);
+    if (csv_gatingList) csv_gatingList.init(dd, seaDragonViewer);
     const imageInit = [viewerManager, channelList, csv_gatingList, [], []];
     await Promise.all([dataLayer.init(), seaDragonViewer.init(...imageInit)]);
 
@@ -227,16 +243,6 @@ async function init(config) {
             segmentationGateRunning = false;
         }
     };
-    const handler = () => updateSeaDragonSelection();
-    eventHandler.bind(CSVGatingList.events.GATING_BRUSH_END, () => {
-        handler();
-        updateCentroidsForGate();
-        runSegmentationGate(true);
-    });
-    eventHandler.bind(CSVGatingList.events.GATING_BRUSH_MOVE, () => {
-        handler();
-        runSegmentationGate(false);
-    });
 
     eventHandler.bind(ChannelList.events.BRUSH_MOVE, (d) => {
         const fullName = dataLayer.getFullChannelName(d.name);
@@ -244,24 +250,43 @@ async function init(config) {
     });
 
     /**
-     * Reset the gating list to inital values.
+     * Reset the (core) channel list to its initial values. Add-on modules hook their own
+     * reset behavior onto this same event via bindEvents() below.
      */
     const reset_lists = () => {
-        csv_gatingList.resetGatingList();
         channelList.resetChannelList();
         seaDragonViewer.forceRepaint();
     };
     eventHandler.bind(ChannelList.events.RESET_LISTS, reset_lists);
 
-    const reset_gatinglist = () => {
-        csv_gatingList.resetGatingList();
-        seaDragonViewer.forceRepaint();
-    };
-    eventHandler.bind(CSVGatingList.events.RESET_GATINGLIST, reset_gatinglist);
+    if (activeModuleDef?.bindEvents) {
+        activeModuleDef.bindEvents({
+            eventHandler,
+            dataLayer,
+            channelList,
+            seaDragonViewer,
+            moduleInstance: activeModuleInstance,
+            updateSeaDragonSelection,
+            updateCentroidsForGate,
+            runSegmentationGate,
+        });
+    }
 
     if (typeof ViewerSidebar !== "undefined" && document.getElementById("viewer_sidebar")) {
-        const viewerSidebar = new ViewerSidebar(config, columns, dataLayer, eventHandler, channelList, csv_gatingList);
+        const viewerSidebar = new ViewerSidebar(config, columns, dataLayer, eventHandler, channelList);
         __minervaAnalysis.viewerSidebar = viewerSidebar;
+        if (activeModuleDef?.createSidebarController) {
+            const moduleSidebarController = activeModuleDef.createSidebarController({
+                sidebar: viewerSidebar,
+                moduleInstance: activeModuleInstance,
+                dataLayer,
+                eventHandler,
+                config,
+            });
+            if (moduleSidebarController) {
+                viewerSidebar.registerModule(moduleSidebarController);
+            }
+        }
         await viewerSidebar.init(dd);
     }
 }

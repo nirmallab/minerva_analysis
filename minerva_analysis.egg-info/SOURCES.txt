@@ -122,6 +122,7 @@ minerva_analysis/server/utils/tiffsurgeon.py
 tests/test_anndata_adapter.py
 tests/test_centroid_tiles.py
 tests/test_csv_adapter.py
+tests/test_database_model.py
 tests/test_datasource_config_routes.py
 tests/test_derive_anndata_channel_names.py
 tests/test_optional_segmentation.py

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from .anndata_adapter import _deduplicate_names
+from minerva_analysis.server.models.adapters.anndata_adapter import _deduplicate_names
 
 try:
     from anndata.io import read_elem, write_elem  # anndata >= 0.10, public API

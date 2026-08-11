@@ -884,6 +884,42 @@ class CSVGatingList {
         var rect2 = el2.getBoundingClientRect();
         return rect2.left - rect1.right;
     }
+
+    // ==== ImageViewer selectionProvider contract (see imageViewer.js) ====
+    // Replaces ImageViewer's former direct dataLayer.getGatedCellIds() calls --
+    // the gating-specific "gates" shape now stays entirely on this side of the seam.
+
+    /**
+     * @function getSelectedIds - resolve a gates filter to matching cell ids
+     * @param filter - gates dict ({channel: [min, max]}); defaults to the
+     *   currently active selections when omitted
+     * @returns {Promise<Set<number>>}
+     */
+    async getSelectedIds(filter) {
+        const gates = filter || this.selections;
+        const { idField } = this.config.featureData[0];
+        const rows = await this.dataLayer.getGatedCellIds(gates, [idField]);
+        if (!Array.isArray(rows)) return new Set();
+        return new Set(rows.map((row) => Number(row[idField] ?? row.id ?? row.CellID)));
+    }
+
+    /**
+     * @function supportsColorCoding - gating owns the multi-range colorized
+     * rendering path (u_gating_shape/texture_gatings); always true here.
+     * @returns {boolean}
+     */
+    supportsColorCoding() {
+        return true;
+    }
+
+    /**
+     * @function getColorCodedRanges - per-channel gate ranges for the
+     * colorized rendering path.
+     * @returns {object}
+     */
+    getColorCodedRanges() {
+        return this.selections;
+    }
 }
 
 //resize sliders, etc on window change
@@ -931,3 +967,37 @@ CSVGatingList.events = {
     GATING_CHANNELS_CHANGE: "GATING_CHANNELS_CHANGE",
     RESET_GATINGLIST: "RESET_GATINGLIST"
 };
+
+// Self-registers the gating module definition (see appModules.js for the shape and
+// main.js for the call sites). Only ever loaded when active_module == 'gating'
+// (base.html), so this always runs alongside GatingSidebarController.
+if (window.AppModules) {
+    window.AppModules.register({
+        name: "gating",
+        createInstance(ctx) {
+            return new CSVGatingList(ctx.config, ctx.columns, ctx.dataLayer, ctx.eventHandler);
+        },
+        createSidebarController(ctx) {
+            return new GatingSidebarController(ctx);
+        },
+        bindEvents(ctx) {
+            const { eventHandler, moduleInstance, seaDragonViewer, updateSeaDragonSelection, updateCentroidsForGate, runSegmentationGate } = ctx;
+            eventHandler.bind(CSVGatingList.events.GATING_BRUSH_END, () => {
+                updateSeaDragonSelection();
+                updateCentroidsForGate();
+                runSegmentationGate(true);
+            });
+            eventHandler.bind(CSVGatingList.events.GATING_BRUSH_MOVE, () => {
+                updateSeaDragonSelection();
+                runSegmentationGate(false);
+            });
+            eventHandler.bind(CSVGatingList.events.RESET_GATINGLIST, () => {
+                moduleInstance.resetGatingList();
+                seaDragonViewer.forceRepaint();
+            });
+            eventHandler.bind(ChannelList.events.RESET_LISTS, () => {
+                moduleInstance.resetGatingList();
+            });
+        },
+    });
+}

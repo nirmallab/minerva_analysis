@@ -9,7 +9,6 @@ License-File: LICENSE
 Requires-Dist: anndata>=0.10
 Requires-Dist: appdirs
 Requires-Dist: Flask>=3.1
-Requires-Dist: Flask-SQLAlchemy>=3.1
 Requires-Dist: imagecodecs
 Requires-Dist: itsdangerous>=2.2
 Requires-Dist: Jinja2>=3.1

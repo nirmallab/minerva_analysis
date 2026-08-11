@@ -739,7 +739,7 @@
     color: #b7e7f7;
 }
 
-#gating_controls_panel {
+#gating_controls_panel, #viewer_controls_panel {
     align-items: center;
     color: var(--text-secondary);
     display: flex;
@@ -748,7 +748,7 @@
     gap: 14px;
 }
 
-#gating_controls_panel {
+#gating_controls_panel, #viewer_controls_panel {
     background: transparent;
     border: 0;
     bottom: auto;
@@ -758,7 +758,7 @@
     z-index: auto;
 }
 
-#gating_controls_panel label {
+#gating_controls_panel label, #viewer_controls_panel label {
     align-items: center;
     display: inline-flex;
     font-size: 12px;
@@ -766,7 +766,7 @@
     margin: 0;
 }
 
-#gating_controls_panel input {
+#gating_controls_panel input, #viewer_controls_panel input {
     height: 14px;
     margin: 0;
     width: 14px;
