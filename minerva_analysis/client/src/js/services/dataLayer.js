@@ -168,6 +168,28 @@ class DataLayer {
         }
     }
 
+    async saveGatesToAnndata(tableName, imageidColumn) {
+        let response = await fetch(minervaUrl('save_gates_to_anndata'), {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(
+                {
+                    datasource: datasource,
+                    table_name: tableName,
+                    imageid_column: imageidColumn
+                }
+            )
+        });
+        let response_data = await response.json();
+        if (!response.ok || !response_data.success) {
+            throw new Error(response_data.error || 'Failed to save gates to AnnData');
+        }
+        return response_data;
+    }
+
     downloadChannelsCSV(map_channels, active_channels, list_colors, list_ranges, list_channels) {
         let form = document.createElement("form");
         form.action = minervaUrl("download_channels_csv");

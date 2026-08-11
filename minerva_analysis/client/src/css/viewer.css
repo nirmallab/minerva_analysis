@@ -278,11 +278,54 @@
     color: var(--text-secondary);
 }
 
+#gate_auto_button {
+    background: #4a5160;
+    color: #f1f4f8;
+}
+
 .sidebar-action:disabled {
     cursor: default;
     filter: none;
     opacity: 0.45;
     transform: none;
+}
+
+.sidebar-action-fancy {
+    align-items: center;
+    background: var(--surface-2);
+    border: 1px solid var(--accent-channel);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    color: #eef3f8;
+    cursor: pointer;
+    display: inline-flex;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 12.5px;
+    font-weight: 700;
+    gap: 8px;
+    height: 36px;
+    justify-content: center;
+    letter-spacing: 0.02em;
+    margin-top: 14px;
+    padding: 0 12px;
+    width: 100%;
+}
+
+.sidebar-action-fancy .fas {
+    color: var(--accent-channel);
+    font-size: 13px;
+}
+
+.sidebar-action-fancy:hover {
+    background: #182231;
+}
+
+.sidebar-action-fancy:active {
+    background: var(--surface-1);
+}
+
+.sidebar-action-fancy[hidden] {
+    display: none;
 }
 
 .distribution-plot {
@@ -564,6 +607,22 @@
 .marker-combobox-option.is-selected .marker-combobox-option-label {
     color: var(--accent-channel);
     font-weight: 700;
+}
+
+.marker-combobox-option-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.marker-combobox-option-indicator {
+    background: #2bd46f;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    height: 6px;
+    width: 6px;
 }
 
 .marker-combobox-hint {
@@ -944,6 +1003,60 @@
 
 #gating_download_panel .download_button:hover {
     transform: scale(1.1);
+}
+
+#gating_save_anndata_panel {
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+    color: #eef3f8;
+    margin-top: 8px;
+    padding: 12px 10px;
+    width: 100%;
+}
+
+#gating_save_anndata_panel label {
+    color: var(--text-secondary);
+    display: block;
+    font-size: 12px;
+    margin-bottom: 8px;
+    width: 100%;
+}
+
+#gating_save_anndata_panel input[type=text] {
+    background: var(--surface-1);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    color: #eef3f8;
+    font-size: 11px;
+    margin-top: 4px;
+    padding: 5px;
+    width: 100%;
+}
+
+#gating_save_anndata_panel .save-anndata-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+#gating_save_anndata_panel .save-anndata-actions .sidebar-action {
+    flex: 1;
+}
+
+#gating_save_anndata_panel #save_anndata_status {
+    font-size: 11px;
+    margin-top: 8px;
+    word-break: break-word;
+}
+
+#gating_save_anndata_panel #save_anndata_status.error {
+    color: #ff6b6b;
+}
+
+#gating_save_anndata_panel #save_anndata_status.success {
+    color: #2bd46f;
 }
 
 body.sidebar-collapsed .viewer-shell,

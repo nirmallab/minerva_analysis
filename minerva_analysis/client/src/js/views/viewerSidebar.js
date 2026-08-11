@@ -103,9 +103,65 @@ class ViewerSidebar {
         const addButton = document.getElementById("add_channel_button");
         addButton.addEventListener("click", () => this.addFirstAvailableChannel());
 
+        this.bindSaveToAnndata();
+
         window.addEventListener("resize", () => {
             this.redrawGateSlider();
             this.redrawChannelSliders();
+        });
+    }
+
+    // Wires the "Save Gates to AnnData" button/panel (adata.uns[table_name],
+    // lower gate bound only, one column per image -- see anndata_gates.py).
+    // Only meaningful for AnnData-backed datasources. The gates payload is
+    // computed fresh from getCustomGatedChannels() at click time -- not from
+    // the persisted GatingList row -- so every marker the user has actually
+    // gated is included, not just whichever one is currently on screen.
+    bindSaveToAnndata() {
+        const button = document.getElementById("save_gates_anndata_button");
+        const panel = document.getElementById("gating_save_anndata_panel");
+        const confirmButton = document.getElementById("save_anndata_confirm");
+        const cancelButton = document.getElementById("save_anndata_cancel");
+        const tableNameInput = document.getElementById("save_anndata_table_name");
+        const imageidColumnInput = document.getElementById("save_anndata_imageid_column");
+        const status = document.getElementById("save_anndata_status");
+
+        if (this.config?.data_type === "anndata") {
+            button.hidden = false;
+        }
+
+        button.addEventListener("click", () => {
+            status.textContent = "";
+            status.className = "";
+            panel.hidden = !panel.hidden;
+        });
+
+        cancelButton.addEventListener("click", () => {
+            panel.hidden = true;
+        });
+
+        confirmButton.addEventListener("click", async () => {
+            confirmButton.disabled = true;
+            status.className = "";
+            status.textContent = "Saving...";
+            try {
+                // The server derives gates from the persisted GatingList row
+                // (the DB), not from anything sent here -- flush the current
+                // in-memory state first so a gate set moments ago (still
+                // inside the 400ms autosave debounce) isn't missed.
+                await this.dataLayer.saveGatingList(this.gatingList.gating_channels, this.gatingList.selections, {});
+                const result = await this.dataLayer.saveGatesToAnndata(
+                    tableNameInput.value.trim() || "gates",
+                    imageidColumnInput.value.trim() || "imageid"
+                );
+                status.className = "success";
+                status.textContent = `Saved column "${result.image_id}" (${result.n_active_gates} markers).`;
+            } catch (error) {
+                status.className = "error";
+                status.textContent = error.message || "Failed to save gates to AnnData";
+            } finally {
+                confirmButton.disabled = false;
+            }
         });
     }
 
@@ -117,6 +173,7 @@ class ViewerSidebar {
                 options: names,
                 value: this.gateMarker || "",
                 placeholder: "Search markers…",
+                getIndicator: (name) => this.describeGateIndicator(name),
                 onChange: (name) => {
                     window.clearTimeout(this.gateMarkerChangeTimer);
                     this.gateMarkerChangeTimer = window.setTimeout(() => {
@@ -919,6 +976,45 @@ class ViewerSidebar {
         const desc = this.databaseDescription[fullName] || {};
         return [desc.min || 0, desc.max || 1];
     }
+
+    // A marker only counts as "gated" once its stored range differs from its
+    // own full data range (getGateRange) -- ensureGateSelection() seeds every
+    // marker the user merely browses to in the dropdown with that same full
+    // range, so membership in gating_channels alone would over-count markers
+    // nobody actually narrowed.
+    hasCustomGate(name) {
+        const fullName = this.dataLayer.getFullChannelName(name);
+        const range = this.gatingList.gating_channels[fullName];
+        if (!range) return false;
+        const defaultRange = this.getGateRange(name);
+        return range[0] !== defaultRange[0] || range[1] !== defaultRange[1];
+    }
+
+    // {fullChannelName: [low, high]} for every marker with a real, user-set
+    // gate -- independent of gatingList.selections, which only ever holds
+    // the single currently-displayed marker (ensureGateSelection() resets it
+    // on every marker switch, by design, for the live single-marker slider/
+    // segmentation-outline view). Used for exports (e.g. save-to-AnnData)
+    // that need *all* gated markers, not just the one on screen right now.
+    getCustomGatedChannels() {
+        const result = {};
+        for (const name of this.columns) {
+            if (!this.hasCustomGate(name)) continue;
+            const fullName = this.dataLayer.getFullChannelName(name);
+            result[fullName] = this.gatingList.gating_channels[fullName];
+        }
+        return result;
+    }
+
+    // Hover-tooltip text for the marker dropdown's gated-indicator dot; null
+    // means "don't show a dot" (SearchableSelect skips rendering it).
+    describeGateIndicator(name) {
+        if (!this.hasCustomGate(name)) return null;
+        const fullName = this.dataLayer.getFullChannelName(name);
+        const range = this.gatingList.gating_channels[fullName];
+        return `Gated ${this.formatValue(range[0])}–${this.formatValue(range[1])}`;
+    }
+
 
     getImageRange(name) {
         if (!name) return [0, 1];

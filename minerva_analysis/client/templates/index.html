@@ -1,8 +1,8 @@
 {% extends 'base.html' %}
 
 {% block style %}
-<link rel="stylesheet" href="../client/src/css/viewer.css?v=20260806_centroid_tiles">
-<link rel="stylesheet" href="../client/src/css/gating.css?v=20260806_centroid_tiles">
+<link rel="stylesheet" href="../client/src/css/viewer.css?v=20260811_gates_all_channels">
+<link rel="stylesheet" href="../client/src/css/gating.css?v=20260811_gates_all_channels">
 {% endblock %}
 
 {% block content %}
@@ -67,8 +67,25 @@
                     <span id="gate_max_value">0.00</span>
                 </div>
                 <div id="gate_slider" class="sidebar-slider"></div>
-                <button id="gate_auto_button" class="sidebar-action" type="button">Auto</button>
+                <button id="gate_auto_button" class="sidebar-action" type="button">Auto Threshold</button>
                 <div id="gate_distribution_plot" class="distribution-plot"></div>
+                <button id="save_gates_anndata_button" class="sidebar-action-fancy" type="button" hidden>
+                    <span class="fas fa-file-export"></span>
+                    Save Gates to AnnData
+                </button>
+                <div id="gating_save_anndata_panel" hidden>
+                    <label>Table name:
+                        <input id="save_anndata_table_name" type="text" autocomplete="false" spellcheck="false" value="gates">
+                    </label>
+                    <label>Image ID column:
+                        <input id="save_anndata_imageid_column" type="text" autocomplete="false" spellcheck="false" value="imageid">
+                    </label>
+                    <div class="save-anndata-actions">
+                        <button id="save_anndata_confirm" class="sidebar-action" type="button">Confirm</button>
+                        <button id="save_anndata_cancel" class="sidebar-action secondary" type="button">Cancel</button>
+                    </div>
+                    <div id="save_anndata_status"></div>
+                </div>
             </section>
 
             <section class="sidebar-section" id="image_channel_section">
@@ -100,9 +117,6 @@
             </section>
 
             <section class="sidebar-section compact">
-                <div class="section-heading">
-                    <h2><span class="fas fa-eye section-heading-icon"></span>Display</h2>
-                </div>
                 <div id="gating_controls_panel">
                     <label>Outlines
                         <input id="gating_controls_outlines" type="checkbox">
@@ -177,6 +191,6 @@
         </div>
     </div>
 </div>
-<script src="../client/src/js/main.js?v=20260806_centroid_tiles" defer></script>
+<script src="../client/src/js/main.js?v=20260811_gates_all_channels" defer></script>
 {% endif %}
 {% endblock %}

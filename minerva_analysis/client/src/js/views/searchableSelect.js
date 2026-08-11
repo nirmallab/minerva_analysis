@@ -9,6 +9,11 @@ class SearchableSelect {
         this.value = options.value || "";
         this.placeholder = options.placeholder || "Search…";
         this.describeOption = options.describeOption || (() => "");
+        // Optional per-option status dot (e.g. "this marker already has a
+        // gate set") -- separate from describeOption's always-visible text
+        // hint, since this is a lightweight visual cue whose detail only
+        // needs to show up on hover (title attribute), not inline text.
+        this.getIndicator = options.getIndicator || null;
         this.onChange = options.onChange || (() => {});
         this.filtered = [...this.options];
         this.activeIndex = -1;
@@ -145,6 +150,16 @@ class SearchableSelect {
             option.dataset.value = name;
             if (name === this.value) option.classList.add("is-selected");
             if (index === this.activeIndex) option.classList.add("is-active");
+
+            if (this.getIndicator) {
+                const indicatorTitle = this.getIndicator(name);
+                if (indicatorTitle) {
+                    const dot = document.createElement("span");
+                    dot.className = "marker-combobox-option-indicator";
+                    dot.title = indicatorTitle;
+                    option.appendChild(dot);
+                }
+            }
 
             const label = document.createElement("span");
             label.className = "marker-combobox-option-label";

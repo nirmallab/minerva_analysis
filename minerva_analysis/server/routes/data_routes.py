@@ -6,6 +6,7 @@ from PIL import Image
 from minerva_analysis import data_path, get_config
 from minerva_analysis.datasource import rename_channels
 from minerva_analysis.server.models import data_model
+from minerva_analysis.server.models.adapters import anndata_gates
 from pathlib import Path
 from time import time
 import polars as pl
@@ -256,6 +257,61 @@ def get_saved_gating_list():
     datasource = request.args.get('datasource')
     resp = data_model.get_saved_gating_list(datasource)
     return serialize_and_submit_json(resp)
+
+@app.route('/save_gates_to_anndata', methods=['POST'])
+def save_gates_to_anndata():
+    """Writes only adata.uns[table_name] (lower gate bound per marker, one
+    column per image) back into the source .h5ad -- never a full anndata
+    rewrite. Gates are derived from the persisted GatingList row (the DB),
+    not from anything the client sends -- the DB is the single source of
+    truth here, same as CSV download/restore-on-reload.
+
+    Important: gate_active is NOT the right signal for "was this channel
+    customized" -- it only ever reflects whichever single marker is
+    currently displayed (gatingList.selections is reset on every marker
+    switch, by design, for the live single-marker slider/segmentation-
+    outline view). The gate_start/gate_end *values* for every OTHER
+    previously-gated channel are still correctly persisted though --
+    save_gating_list writes them from gating_channels, which is never
+    wiped -- so a channel counts as "has a gate" here by comparing its
+    stored gate_start/gate_end against its own true full data range
+    (get_datasource_description), exactly like the marker dropdown's
+    green-dot indicator does client-side (viewerSidebar.js's
+    hasCustomGate), not by trusting gate_active."""
+    post_data = json.loads(request.data)
+    datasource = post_data['datasource']
+    table_name = post_data.get('table_name') or 'gates'
+    imageid_column = post_data.get('imageid_column') or 'imageid'
+
+    config = get_config()
+    entry = config.get(datasource)
+    if not entry or entry.get('data_type') != 'anndata':
+        return jsonify(success=False, error="Not an AnnData datasource"), 400
+
+    saved_rows = data_model.get_saved_gating_list(datasource) or []
+    description = data_model.get_datasource_description(datasource)
+    active_gates = {}
+    for row in saved_rows:
+        channel = row.get('channel')
+        if not channel or channel == 'Lasso':
+            continue
+        gate_start = row.get('gate_start')
+        gate_end = row.get('gate_end')
+        if gate_start is None or gate_end is None:
+            continue
+        desc = description.get(channel) or {}
+        if gate_start == desc.get('min') and gate_end == desc.get('max'):
+            continue  # still at the full default range -- never customized
+        active_gates[channel] = gate_start
+
+    try:
+        result = anndata_gates.save_gates_to_anndata(
+            entry['featureData'][0], datasource, active_gates,
+            table_name=table_name, imageid_column=imageid_column)
+    except ValueError as exc:
+        return jsonify(success=False, error=str(exc)), 400
+
+    return jsonify(success=True, **result)
 
 @app.route('/download_channels_csv', methods=['POST'])
 def download_channels_csv():
