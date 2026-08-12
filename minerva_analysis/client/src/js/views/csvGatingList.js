@@ -458,6 +458,7 @@ class CSVGatingList {
         const download_input2 = document.querySelector('#download_input2');
         const gating_controls_outlines = document.querySelector('#gating_controls_outlines')
         const gating_controls_centroids = document.querySelector('#gating_controls_centroids')
+        const viewer_controls_hd = document.querySelector('#viewer_controls_hd')
 
         // Events ::
 
@@ -555,6 +556,11 @@ class CSVGatingList {
                     this.seaDragonViewer.setLoading(false);
                 }
             }
+        })
+
+        // Toggle HD (full-precision 16-bit) tile quality
+        viewer_controls_hd.addEventListener('change', e => {
+            this.seaDragonViewer.viewerManagerVMain.setHdMode(e.target.checked);
         })
 
     }

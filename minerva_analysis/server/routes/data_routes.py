@@ -2,7 +2,6 @@ from minerva_analysis import app
 from flask import make_response, render_template, request, Response, jsonify, abort, send_file
 import csv
 import io
-from PIL import Image
 from minerva_analysis import get_config
 from minerva_analysis.datasource import rename_channels
 from minerva_analysis.server.models import data_model
@@ -211,35 +210,42 @@ _tile_png_cache_lock = threading.Lock()
 _TILE_PNG_CACHE_MAX = 1500
 
 
-def _get_tile_png_bytes(datasource, channel, level, tile):
+def _get_tile_png_bytes(datasource, channel, level, tile, quality):
     # Keyed on data_model.load_generation so a datasource reload (which may
     # regenerate segmentation, per ensure_outline_segmentation) naturally
     # invalidates previously cached tiles without cross-module cache access.
-    key = (data_model.load_generation, datasource, channel, level, tile)
+    # `quality` is part of the key so default/hd/legacy variants of the same
+    # tile don't collide.
+    key = (data_model.load_generation, datasource, channel, level, tile, quality)
     with _tile_png_cache_lock:
         cached = _tile_png_cache.get(key)
         if cached is not None:
             _tile_png_cache.move_to_end(key)
             return cached
 
-    png = data_model.generate_zarr_png(datasource, channel, level, tile)
-    file_object = io.BytesIO()
-    Image.fromarray(png).save(file_object, 'PNG', compress_level=0)
-    encoded = file_object.getvalue()
+    encoded, mimetype = data_model.encode_tile(datasource, channel, level, tile, quality)
 
     with _tile_png_cache_lock:
-        _tile_png_cache[key] = encoded
+        _tile_png_cache[key] = (encoded, mimetype)
         _tile_png_cache.move_to_end(key)
         while len(_tile_png_cache) > _TILE_PNG_CACHE_MAX:
             _tile_png_cache.popitem(last=False)
-    return encoded
+    return encoded, mimetype
 
 
 # E.G /generated/data/melanoma/channel_00_files/13/16_18.png
+# ?q=hd requests the full-precision 16-bit path for channel tiles; anything
+# else (including the param being absent) uses the fast default WebP path.
+# Segmentation tiles ignore `q` entirely -- see data_model.encode_tile.
 @app.route('/generated/data/<string:datasource>/<string:channel>/<string:level>/<string:tile>')
 def generate_png(datasource, channel, level, tile):
-    encoded = _get_tile_png_bytes(datasource, channel, level, tile)
-    return send_file(io.BytesIO(encoded), mimetype='image/PNG')
+    # Frontend can now decode WebP (createImageBitmap-based u8 path, verified
+    # against real data) -- an absent `q` is the true default: fast/small
+    # WebP. `q=legacy` is kept as an explicit escape hatch back to the
+    # original uncompressed PNG behavior if ever needed.
+    quality = request.args.get('q', 'webp')
+    encoded, mimetype = _get_tile_png_bytes(datasource, channel, level, tile, quality)
+    return send_file(io.BytesIO(encoded), mimetype=mimetype)
 
 def serialize_and_submit_json(data):
     response = app.response_class(

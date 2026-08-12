@@ -1,5 +1,12 @@
 import "regenerator-runtime/runtime.js";
 
+// Global HD-toggle state, read by getTileUrl() below. A plain module-scope
+// flag (not a ViewerManager instance field) because getTileUrl runs with
+// `this` bound to the tileSource object it's attached to, not the
+// ViewerManager -- this is the one place in the tile-loading path that
+// needs the toggle state and can't reach it via `this`.
+export const tileQuality = { hd: false };
+
 /**
  * @function toIdealTile -- full tile dimension in full image pixels
  * @param fullScale - scale factor to full image
@@ -116,7 +123,11 @@ function toTileLevels(level, x, y) {
  */
 function getTileUrl(level, x, y) {
     const s = this.toTileLevels(level, x, y).inputTile;
-    return `${this.src}${s.level}/${s.x}_${s.y}.png`;
+    // Segmentation (tileFormat 32) always ignores the HD toggle -- it has
+    // its own fixed encoding regardless -- so its URL (and OSD's URL-keyed
+    // tile cache) never churns when HD is flipped.
+    const hdParam = this.tileFormat !== 32 && tileQuality.hd ? "?q=hd" : "";
+    return `${this.src}${s.level}/${s.x}_${s.y}.png${hdParam}`;
 }
 
 /**
@@ -175,6 +186,33 @@ export class ViewerManager {
     init() {
         // Load label image
         this.load_label_image();
+    }
+
+    /**
+     * @function setHdMode
+     * Toggle the global HD (full-precision 16-bit) tile quality on/off and
+     * force OpenSeadragon to re-fetch currently-loaded tiles at the new
+     * quality. Segmentation tiles are unaffected (see getTileUrl). Dispatches
+     * a DOM event so the (unbundled) sidebar can remap its per-channel range
+     * sliders between byte units ([0,255], default mode) and raw 16-bit
+     * units (HD mode) -- a plain window event because viewerSidebar.js is a
+     * raw <script>, not an ES module, so it can't import tileQuality here
+     * directly.
+     * @param enabled - true for HD (16-bit), false for the fast/default WebP path
+     */
+    setHdMode(enabled) {
+        tileQuality.hd = enabled;
+        this.imageViewer.clearTileCache(false);
+        window.dispatchEvent(new CustomEvent("minerva:hd-mode-changed", { detail: { enabled } }));
+    }
+
+    /**
+     * @function isHdMode
+     * @returns {boolean} whether the global HD (full-precision 16-bit) tile
+     * quality is currently enabled.
+     */
+    isHdMode() {
+        return tileQuality.hd;
     }
 
     /**

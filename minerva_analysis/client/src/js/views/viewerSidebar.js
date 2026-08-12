@@ -29,6 +29,80 @@ class ViewerSidebar {
             { label: "Green", hex: "#2bd46f", rgb: { r: 43, g: 212, b: 111 } },
             { label: "White", hex: "#ffffff", rgb: { r: 255, g: 255, b: 255 } },
         ];
+        // Per-channel range sliders live in [0, 255] byte units by default
+        // (matching the quantized WebP tile data 1:1) and switch to raw
+        // 16-bit units when HD is on (see getImageRange/toImageConnectorRange/
+        // autoChannel below, and frag.glsl's u8_r_range for why this matters:
+        // without it the slider's domain doesn't match the encoded data's
+        // domain, which is what caused visible banding).
+        window.addEventListener("minerva:hd-mode-changed", (e) => this.onHdModeChanged(Boolean(e.detail?.enabled)));
+    }
+
+    isHdMode() {
+        return Boolean(window.__minervaAnalysis?.seaDragonViewer?.viewerManagerVMain?.isHdMode?.());
+    }
+
+    /**
+     * @function rawToByteRange
+     * Maps a [min, max] pair in raw 16-bit units into the [0, 255] byte
+     * domain the server actually quantized against (packet.qmin/qmax --
+     * see get_channel_gmm), clamped to a valid byte range.
+     */
+    rawToByteRange([rmin, rmax], packet) {
+        const span = Math.max(packet.qmax - packet.qmin, 1);
+        const toByte = (v) => Math.min(255, Math.max(0, Math.round(((v - packet.qmin) / span) * 255)));
+        return [toByte(rmin), toByte(rmax)];
+    }
+
+    /**
+     * @function byteToRawRange
+     * Inverse of rawToByteRange: maps a [min, max] pair in [0, 255] byte
+     * units back into raw 16-bit units.
+     */
+    byteToRawRange([bmin, bmax], packet) {
+        const span = Math.max(packet.qmax - packet.qmin, 1);
+        const toRaw = (v) => packet.qmin + (v / 255) * span;
+        return [toRaw(bmin), toRaw(bmax)];
+    }
+
+    /**
+     * @function toRawRangeForSlot
+     * slot.range is byte-domain in default mode, raw in HD mode (see
+     * onHdModeChanged) -- this always returns raw 16-bit units, for
+     * persistence (persistChannelList) which must stay domain-independent
+     * since it's read back across sessions/mode changes on restore.
+     * Falls back to slot.range unconverted if no GMM packet is cached yet
+     * (shouldn't happen for an active/auto-leveled slot).
+     */
+    toRawRangeForSlot(slot) {
+        if (this.isHdMode()) return slot.range;
+        const packet = this.channelList.hasChannelGMM[slot.name];
+        if (!packet) return slot.range;
+        return this.byteToRawRange(slot.range, packet);
+    }
+
+    /**
+     * @function onHdModeChanged
+     * Remaps every active channel slot's current range (whatever the user
+     * has it set to, default or manually adjusted) into the newly-active
+     * domain, so the visible contrast window doesn't silently jump/reset
+     * on toggle, then updates the slider bounds and repaints.
+     */
+    onHdModeChanged(enabled) {
+        this.channelSlots.forEach((slot) => {
+            if (!slot.name) return;
+            const packet = this.channelList.hasChannelGMM[slot.name];
+            if (!packet) return;
+            slot.range = enabled
+                ? this.byteToRawRange(slot.range, packet)
+                : this.rawToByteRange(slot.range, packet);
+            this.setSlotRange(slot.index, slot.range, slot.userRangeChanged);
+            if (slot.expanded) {
+                this.redrawChannelSlider(slot);
+            } else {
+                slot.sliderDirty = true;
+            }
+        });
     }
 
     async init(databaseDescription) {
@@ -51,7 +125,7 @@ class ViewerSidebar {
         // back to DB".
         this._restoring = true;
         if (savedChannels && savedChannels.length) {
-            this.applySavedChannels(savedChannels);
+            await this.applySavedChannels(savedChannels);
         } else {
             this.initChannelSlots();
             this.applyInitialChannels();
@@ -471,7 +545,7 @@ class ViewerSidebar {
         }
         const packet = this.channelList.hasChannelGMM[slot.name];
         if (!packet || (!options.force && slot.userRangeChanged)) return;
-        slot.range = [packet.vmin, packet.vmax];
+        slot.range = this.isHdMode() ? [packet.vmin, packet.vmax] : this.rawToByteRange([packet.vmin, packet.vmax], packet);
         slot.autoLeveled = true;
         const slider = this.channelSlotSliders.get(slotIndex);
         if (slider) {
@@ -561,7 +635,7 @@ class ViewerSidebar {
         this.updateSlotReadout(slot);
     }
 
-    applySavedChannels(rows) {
+    async applySavedChannels(rows) {
         const activeRows = rows.filter((row) => row && row.channel_active);
         const slotList = document.getElementById("channel_slot_list");
         slotList.innerHTML = "";
@@ -598,15 +672,28 @@ class ViewerSidebar {
             slotList.appendChild(this.createChannelSlot(slot));
         }
 
-        activeRows.slice(0, count).forEach((row, i) => {
+        for (const [i, row] of activeRows.slice(0, count).entries()) {
             const slot = this.channelSlots[i];
-            if (!slot) return;
+            if (!slot) continue;
             this.setSlotMarker(slot.index, row.channel, { keepColor: true, enable: true, force: true });
             this.setSlotColor(slot.index, this.rgbToHex(row.r, row.g, row.b), true);
-            this.setSlotRange(slot.index, [row.start, row.end], true);
+            // row.start/row.end are always raw 16-bit units (see
+            // persistChannelList/toRawRangeForSlot) -- convert to the
+            // currently-active domain before assigning to slot.range.
+            let range = [row.start, row.end];
+            if (!this.isHdMode()) {
+                if (!(slot.name in this.channelList.hasChannelGMM)) {
+                    await this.channelList.getAndDrawChannelGMM(slot.name);
+                }
+                const packet = this.channelList.hasChannelGMM[slot.name];
+                if (packet) {
+                    range = this.rawToByteRange(range, packet);
+                }
+            }
+            this.setSlotRange(slot.index, range, true);
             slot.expanded = false;
             this.applySlotExpansion(slot);
-        });
+        }
         this.updateSelectedCount();
     }
 
@@ -627,20 +714,26 @@ class ViewerSidebar {
         // for every image channel. getImageRange(name) already resolves a DNA-like
         // channel's real image_min/image_max fine -- it just was never called for it.
         Object.values(imageChannelsIdx).forEach((name) => {
-            listChannels[name] = this.channelList.image_channels[name] || this.getImageRange(name);
+            listChannels[name] = this.channelList.image_channels[name] || this.getRawImageRange(name);
         });
         const activeChannels = {};
         const listColors = {};
         const listRanges = {};
+        const bitMax = this.dataLayer.imageBitRange[1];
         this.channelSlots.forEach((slot) => {
             if (!slot.name || !slot.enabled) return;
             const fullName = this.dataLayer.getFullChannelName(slot.name);
             const idx = imageChannels[fullName];
             if (idx === undefined) return;
+            // Persisted state must be domain-independent (always raw 16-bit
+            // units) since it's read back across sessions and across mode
+            // changes -- slot.range itself is byte-domain in default mode
+            // (see toRawRangeForSlot).
+            const rawRange = this.toRawRangeForSlot(slot);
             activeChannels[idx] = true;
             listColors[idx] = { color: { ...slot.color, opacity: 1 } };
-            listRanges[idx] = this.toImageConnectorRange(slot.range);
-            listChannels[slot.name] = slot.range;
+            listRanges[idx] = [rawRange[0] / bitMax, rawRange[1] / bitMax];
+            listChannels[slot.name] = rawRange;
         });
         return this.dataLayer.saveChannelList(imageChannelsIdx, activeChannels, listColors, listRanges, listChannels);
     }
@@ -670,14 +763,31 @@ class ViewerSidebar {
         if (max) max.textContent = this.formatValue(slot.range[1]);
     }
 
-    getImageRange(name) {
+    // Raw 16-bit bounds for a channel, regardless of current mode -- the
+    // stable representation used for persistence and as the HD-mode slider
+    // domain. getImageRange() below is the mode-aware wrapper UI code should
+    // normally call instead.
+    getRawImageRange(name) {
         if (!name) return [0, 1];
         const fullName = this.dataLayer.getFullChannelName(name);
         const desc = this.databaseDescription[fullName] || {};
         return [desc.image_min || this.dataLayer.imageBitRange[0] || 0, desc.image_max || this.dataLayer.imageBitRange[1] || 65536];
     }
 
+    getImageRange(name) {
+        if (!name) return [0, 1];
+        if (!this.isHdMode()) {
+            // Default mode: the slider works directly in the same [0, 255]
+            // byte domain the server quantized into -- see rawToByteRange.
+            return [0, 255];
+        }
+        return this.getRawImageRange(name);
+    }
+
     toImageConnectorRange(values) {
+        if (!this.isHdMode()) {
+            return [values[0] / 255, values[1] / 255];
+        }
         const defaultRange = this.dataLayer.imageBitRange;
         return [values[0] / defaultRange[1], values[1] / defaultRange[1]];
     }

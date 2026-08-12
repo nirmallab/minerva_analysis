@@ -135,6 +135,8 @@ export class GLRenderer {
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8UI, width, height, 0, gl.RG_INTEGER, gl.UNSIGNED_BYTE, pixels);
         } else if (format == 'u32') {
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8UI, width, height, 0, gl.RGBA_INTEGER, gl.UNSIGNED_BYTE, pixels);
+        } else if (format == 'u8') {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, width, height, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, pixels);
         }
 
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

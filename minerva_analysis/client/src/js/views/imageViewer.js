@@ -181,7 +181,7 @@ class ImageViewer {
             const { source } = e.tiledImage;
             const tileArgs = [e.tile.level, e.tile.x, e.tile.y];
             const format = e.tile._format || `u${source.format}`;
-            const okFormat = ["u16", "u32"].includes(format);
+            const okFormat = ["u16", "u32", "u8"].includes(format);
             const tKey = source.getTileKey(...tileArgs);
             const pixels = e.tile._array;
 
@@ -198,6 +198,7 @@ class ImageViewer {
                 const textureArgs = {
                     u16: [gl.RG8UI, w, h, 0, gl.RG_INTEGER],
                     u32: [gl.RGBA8UI, w, h, 0, gl.RGBA_INTEGER],
+                    u8: [gl.R8UI, w, h, 0, gl.RED_INTEGER],
                 }[format];
 
                 // Send the tile into the texture.
@@ -256,6 +257,14 @@ class ImageViewer {
                 const range = _.get(channel, "range", floatRange);
                 const color = _.get(channel, "color", d3.color("white"));
                 const floatColor = toFloatColor(color);
+                // The fast/default tile path quantizes 16-bit -> 8-bit
+                // server-side, linear against the channel's true max (see
+                // get_channel_gmm's qmin/qmax). The shader now works
+                // directly in that same [0, 255] byte domain -- u_tile_range
+                // is expressed in byte units too in this mode (see
+                // viewerSidebar.js's getImageRange/toImageConnectorRange),
+                // so no reconstruction back into 16-bit units is needed here.
+                const tileFmt = e.tile._format === "u8" ? 8 : 16;
                 // Store channel color and range to send to shader
                 via.gl_arguments = {
                     ...centerProps,
@@ -264,7 +273,7 @@ class ImageViewer {
                     picked_end_1i: 0,
                     color_3fv: new Float32Array(floatColor),
                     range_2fv: new Float32Array(range),
-                    fmt_1i: 16,
+                    fmt_1i: tileFmt,
                 };
             } else {
                 if (!e.tile._array) {
@@ -449,13 +458,39 @@ class ImageViewer {
                     return;
                 }
                 else if (responseArray) {
-                    const img = window.UPNG.decode(responseArray);
-                    if (img.ctype == 0 && img.depth == 16) {
-                        e.tile._array = img.data.slice(0, 2 * img.width * img.height);
-                        e.tile._format = "u16";
-                    } else if (img.ctype == 6 && img.depth == 8) {
-                        e.tile._array = img.data.slice(0, 4 * img.width * img.height);
-                        e.tile._format = "u32";
+                    const sig = new Uint8Array(responseArray, 0, 4);
+                    const isWebp = sig[0] === 0x52 && sig[1] === 0x49 && sig[2] === 0x46 && sig[3] === 0x46; // "RIFF"
+                    if (isWebp) {
+                        // Fast/default tile path: quantized 8-bit, single value
+                        // per pixel. Decoded via createImageBitmap (not
+                        // UPNG.js, which can't parse WebP) -- confirmed safe
+                        // for this opaque/single-channel case by an in-browser
+                        // spike; segmentation tiles never take this path (see
+                        // decodeLabelTile) because the same decode approach
+                        // was found to corrupt RGB wherever alpha=0.
+                        const blob = new Blob([responseArray], { type: "image/webp" });
+                        const bitmap = await createImageBitmap(blob, { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+                        const { width, height } = bitmap; // capture before close() -- closing zeroes these
+                        const canvas = new OffscreenCanvas(width, height);
+                        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+                        ctx.drawImage(bitmap, 0, 0);
+                        const rgba = ctx.getImageData(0, 0, width, height).data;
+                        bitmap.close();
+                        const u8 = new Uint8Array(width * height);
+                        for (let i = 0; i < u8.length; i++) {
+                            u8[i] = rgba[i * 4];
+                        }
+                        e.tile._array = u8;
+                        e.tile._format = "u8";
+                    } else {
+                        const img = window.UPNG.decode(responseArray);
+                        if (img.ctype == 0 && img.depth == 16) {
+                            e.tile._array = img.data.slice(0, 2 * img.width * img.height);
+                            e.tile._format = "u16";
+                        } else if (img.ctype == 6 && img.depth == 8) {
+                            e.tile._array = img.data.slice(0, 4 * img.width * img.height);
+                            e.tile._format = "u32";
+                        }
                     }
                 }
             } catch (err) {
@@ -1330,7 +1365,13 @@ class ImageViewer {
      * @param tfmax - maximum
      */
     updateChannelRange(name, tfmin, tfmax) {
-        let range = this.numericData.intRange;
+        // In the default (non-HD) mode tfmin/tfmax already arrive in [0, 255]
+        // byte units (see viewerSidebar.js) -- divide by 255, not the full
+        // 16-bit range, so this matches what the shader's u8 path now reads
+        // u_tile_range as directly (see frag.glsl's u8_r_range). HD mode
+        // keeps the original raw-16-bit-unit behavior.
+        const hd = Boolean(this.viewerManagerVMain?.isHdMode?.());
+        const range = hd ? this.numericData.intRange : [0, 255];
         const channelIdx = imageChannels[name];
         if (this.currentChannels[channelIdx]) {
             let channelRange = [tfmin / range[1], tfmax / range[1]];

@@ -475,6 +475,25 @@ vec4 u16_rg_range(float alpha) {
   return vec4(pixel_color, alpha);
 }
 
+// Colorize a quantized 8-bit signal (the fast/default WebP tile path).
+// The server already quantized the original 16-bit value into [0, 255]
+// (linear against the channel's true max); u_tile_range is expressed in
+// that SAME [0, 255] domain in this mode (see viewerSidebar.js), so the
+// quantized byte can feed range_clamp directly -- no reconstruction back
+// into 16-bit units, and therefore no precision mismatch between the
+// slider's domain and the encoded data's domain.
+vec4 u8_r_range(float alpha) {
+  uint pixel = offset(u_tile, u_tile_shape, uv, vec2(0, 0)).r;
+  float quant = float(pixel) / 255.;
+
+  // Threshhold pixel within range
+  float pixel_val = range_clamp(quant);
+
+  // Color pixel value
+  vec3 pixel_color = u_tile_color * pixel_val;
+  return vec4(pixel_color, alpha);
+}
+
 //
 // Entrypoint
 //
@@ -482,6 +501,9 @@ vec4 u16_rg_range(float alpha) {
 void main() {
   if (u_tile_fmt == 32) {
     color = u32_rgba_map(u_draw_mode);
+  }
+  else if (u_tile_fmt == 8) {
+    color = u8_r_range(0.9);
   }
   else {
     color = u16_rg_range(0.9);

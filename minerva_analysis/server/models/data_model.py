@@ -11,9 +11,11 @@ from pathlib import PurePath
 from ome_types import from_xml
 from minerva_analysis import config_json_path, data_path, cwd_path
 from minerva_analysis.server.utils import pyramid_assemble, pyramid_upgrade
+from minerva_analysis.server.utils import fast_png
 from minerva_analysis.server.models.adapters import get_adapter
 from minerva_analysis.server.models import database_model, centroid_tiles
 from minerva_analysis.server.utils import smallestenclosingcircle
+from PIL import Image
 import matplotlib.path as mpltPath
 from itertools import chain
 import dateutil.parser
@@ -797,7 +799,8 @@ def get_channel_gmm(channel_name, datasource_name):
     real_channels = [d for d in config[datasource_name]['imageData'] if d['fullname'] != 'Area']
     image_channelIdx = next(index for (index, d) in enumerate(real_channels) if d["fullname"] == channel_name)
     image_data = zarray[image_channelIdx]
-    img_log = np.log(image_data[image_data > 0])
+    nonzero = image_data[image_data > 0]
+    img_log = np.log(nonzero)
     gmm = GaussianMixture(3, max_iter=1000, tol=1e-6)
     gmm.fit(img_log.reshape((-1, 1)))
 
@@ -816,9 +819,37 @@ def get_channel_gmm(channel_name, datasource_name):
         lmin = mean2 - 2 * std2
     vmin = max(np.exp(lmin), image_data.min(), 0)
     vmax = min(np.exp(lmax), image_data.max())
-
     packet_gmm['vmin'] = np.rint(vmin)
     packet_gmm['vmax'] = np.rint(vmax)
+
+    # Quantization window for the default (non-HD) WebP tile path -- deliberately
+    # separate from vmin/vmax above (the display/contrast-slider default).
+    # Straight linear (data/max)*255: no clipping anywhere, ever, at the cost
+    # of coarser uint8 steps through the bulk of the image whenever a channel
+    # has a single much-brighter-than-typical peak (verified against real
+    # slide data -- see webp_compare_report.pdf for the tradeoff vs a
+    # percentile window).
+    #
+    # image_data (the zarray sample) is NOT a valid source for this ceiling,
+    # even though it's already loaded: it's mean-pooled down from full
+    # resolution (a pyramid level plus an additional block_reduce, ~1000x
+    # area averaging in a typical whole-slide image here) purely so the GMM
+    # fit above stays fast. Mean-pooling dilutes real single/few-pixel peaks
+    # far below what the actual full-resolution tiles served by encode_tile()
+    # contain -- using it as a max-based ceiling under-clips real data.
+    # Verified live: caused whole channels to saturate to a single solid
+    # color, since most full-res pixels legitimately exceeded that
+    # artificially low ceiling. The true max requires reading full-resolution
+    # data at least once; do that here, cached afterwards same as everything
+    # else in this function.
+    if isinstance(channels, zarr.Array):
+        full_res_channel = channels[image_channelIdx]
+    else:
+        full_res_channel = _zarr_level(channels, 0)[image_channelIdx]
+    qmin = 0.0
+    qmax = max(float(np.asarray(full_res_channel).max()), 1.0)
+    packet_gmm['qmin'] = qmin
+    packet_gmm['qmax'] = qmax
 
     [hist, bin_edges] = np.histogram(img_log.flatten(), bins=50, density=True)
     midpoints = (bin_edges[1:] + bin_edges[:-1]) / 2
@@ -869,11 +900,7 @@ def generate_zarr_png(datasource_name, channel, level, tile):
     tile_height = config[datasource_name]['tileHeight']
     ix = tx * tile_width
     iy = ty * tile_height
-    segmentation = False
-    try:
-        channel_num = int(re.match(r".*_(\d*)$", channel).groups()[0])
-    except AttributeError:
-        segmentation = True
+    channel_num, segmentation = _parse_channel(channel)
     if segmentation:
         tile = _zarr_level(seg, level)[iy:iy + tile_height, ix:ix + tile_width]
         if tile.dtype.itemsize != 4:
@@ -890,6 +917,62 @@ def generate_zarr_png(datasource_name, channel, level, tile):
     # tile = np.ascontiguousarray(tile, dtype='uint32')
     # png = tile.view('uint8').reshape(tile.shape + (-1,))[..., [2, 1, 0]]
     return tile
+
+
+def _parse_channel(channel):
+    """Returns (channel_num, is_segmentation) for a channel identifier like
+    "<file>_<N>" (channel_num=N), or a segmentation/label channel name with
+    no trailing "_<N>" (is_segmentation=True)."""
+    try:
+        return int(re.match(r".*_(\d*)$", channel).groups()[0]), False
+    except AttributeError:
+        return None, True
+
+
+def _channel_num_to_name(datasource_name, channel_num):
+    real_channels = [d for d in config[datasource_name]['imageData'] if d['fullname'] != 'Area']
+    return real_channels[channel_num]['fullname']
+
+
+def encode_tile(datasource_name, channel, level, tile, quality):
+    """Returns (encoded_bytes, mimetype) for one tile request. `quality` is
+    'hd' for full-precision 16-bit, 'legacy' for the original uncompressed
+    PNG behavior, anything else selects the fast/default 8-bit-quantized
+    WebP path for channel tiles. Segmentation tiles ignore `quality`
+    entirely -- they always need byte-exact label IDs, and always use the
+    fast libdeflate PNG encoder (never WebP: verified that WebP lossless,
+    even with exact=True at encode time, gets its RGB corrupted by the
+    browser's own decoder wherever alpha=0 -- which is every pixel here --
+    regardless of decode API used; PNG has no such decode-side risk since
+    the frontend parses PNG bytes directly via UPNG.js, not a canvas)."""
+    array = generate_zarr_png(datasource_name, channel, level, tile)
+    channel_num, is_segmentation = _parse_channel(channel)
+
+    if is_segmentation:
+        return fast_png.encode_rgba8_png(array), 'image/png'
+
+    if quality == 'hd':
+        return fast_png.encode_gray16_png(array), 'image/png'
+
+    if quality == 'legacy':
+        file_object = io.BytesIO()
+        Image.fromarray(array).save(file_object, 'PNG', compress_level=0)
+        return file_object.getvalue(), 'image/png'
+
+    # Default: quantize linearly into [0, channel_max] (see get_channel_gmm's
+    # qmin/qmax) -- deliberately NOT vmin/vmax, which is the narrower GMM
+    # display/contrast-slider window applied separately client-side. This
+    # window never clips, at the cost of a coarser uint8 step size across the
+    # image whenever one pixel is much brighter than the rest (see
+    # webp_compare_report.pdf for the measured tradeoff). Encode WebP lossy q90.
+    channel_name = _channel_num_to_name(datasource_name, channel_num)
+    gmm = get_channel_gmm(channel_name, datasource_name)
+    qmin, qmax = gmm['qmin'], gmm['qmax']
+    span = qmax - qmin  # already guarded >= 1 in get_channel_gmm
+    quantized = np.clip(np.rint((array.astype(np.float64) - qmin) / span * 255), 0, 255).astype(np.uint8)
+    file_object = io.BytesIO()
+    Image.fromarray(quantized, mode='L').save(file_object, 'WEBP', quality=90, method=6)
+    return file_object.getvalue(), 'image/webp'
 
 
 def get_ome_metadata(datasource_name):
