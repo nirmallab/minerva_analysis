@@ -4,18 +4,16 @@
  * local image is always POSTed to /quick_view -- never the file's bytes,
  * so huge OME-TIFFs load instantly instead of being copied over HTTP.
  *
- * Browsers do not expose a File's absolute filesystem path to a regular
- * web page (Chrome only ever did this for Electron/packaged-app contexts,
- * never for an ordinary page like this one) -- so the path input is the
- * primary, always-visible way to load an image. Drag-and-drop / click-to-
- * browse is a convenience on top of it: it fills in the filename (the one
- * thing a File object *does* expose) so the user only has to complete the
- * folder part, and opportunistically submits immediately if a nonstandard
- * File.path ever is present (e.g. some embedding contexts).
+ * Clicking the dropzone asks the *server* (which runs on the same machine,
+ * launched from a terminal or Jupyter) to pop a native OS file dialog and
+ * hand back the real path -- see /browse_path and
+ * server/utils/native_dialog.py. That only works when there's a real
+ * desktop session for the dialog to appear on, so the manual path input is
+ * a soft fallback, hidden until the browse call actually fails.
  */
 (function () {
     const dropzone = document.getElementById("quick_view_dropzone");
-    const fileInput = document.getElementById("quick_view_file_input");
+    const pathFallback = document.getElementById("quick_view_path_fallback");
     const pathInput = document.getElementById("quick_view_path_input");
     const loadButton = document.getElementById("quick_view_path_load");
     const status = document.getElementById("quick_view_status");
@@ -61,48 +59,45 @@
         }
     }
 
-    function handleFile(file) {
-        if (!file) {
-            return;
-        }
-        if (file.path) {
-            submitQuickView(file.path);
-            return;
-        }
-        // No absolute path available -- pre-fill just the filename and put
-        // the cursor at the start so the user can type/paste the folder
-        // part in front of it.
-        pathInput.value = file.name || "";
+    // Reveals the manual path input -- used only once the native dialog has
+    // failed to produce a full path on its own.
+    function showPathFallback(message) {
+        pathFallback.hidden = false;
+        setStatus(message || null, !!message);
         pathInput.focus();
-        pathInput.setSelectionRange(0, 0);
         pathInput.dispatchEvent(new Event("input"));
     }
 
-    dropzone.addEventListener("click", () => fileInput.click());
+    async function browseForImage() {
+        setStatus("Opening file browser...", false);
+        try {
+            const response = await fetch(minervaUrl("browse_path"), {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({mode: "file"}),
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.error);
+            }
+            setStatus(null);
+            if (result.path) {
+                submitQuickView(result.path);
+            }
+            // result.path === null just means the user cancelled the dialog.
+        } catch (error) {
+            // Soft fallback: no desktop session for a dialog to appear on
+            // (headless/remote server, no display, tkinter missing, ...).
+            showPathFallback("Automatic browsing isn't available here -- paste the full path instead.");
+        }
+    }
+
+    dropzone.addEventListener("click", () => browseForImage());
     dropzone.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            fileInput.click();
+            browseForImage();
         }
-    });
-    fileInput.addEventListener("change", () => handleFile(fileInput.files[0]));
-
-    ["dragenter", "dragover"].forEach((eventName) => {
-        dropzone.addEventListener(eventName, (event) => {
-            event.preventDefault();
-            dropzone.classList.add("drag-over");
-        });
-    });
-    ["dragleave", "dragend"].forEach((eventName) => {
-        dropzone.addEventListener(eventName, (event) => {
-            event.preventDefault();
-            dropzone.classList.remove("drag-over");
-        });
-    });
-    dropzone.addEventListener("drop", (event) => {
-        event.preventDefault();
-        dropzone.classList.remove("drag-over");
-        handleFile(event.dataTransfer.files[0]);
     });
 
     let validationRequestId = 0;

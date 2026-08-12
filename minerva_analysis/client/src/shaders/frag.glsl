@@ -494,6 +494,20 @@ vec4 u8_r_range(float alpha) {
   return vec4(pixel_color, alpha);
 }
 
+// True while `screen` (quad-space uv) maps inside the tile's actual valid
+// data region. u_x_bounds/u_y_bounds can legitimately extend outside
+// [0, 1] -- e.g. an edge tile stretched past its real coverage while
+// zoomed beyond native resolution (see toMagnifiedBounds in
+// viewerManager.js) -- and outside that range GL's CLAMP_TO_EDGE wrap mode
+// just keeps returning the boundary texel forever. Without this check
+// those out-of-bounds fragments painted a solid smear of that edge
+// texel/color across the rest of the quad instead of showing nothing.
+bool in_tile_bounds(vec2 screen) {
+  float x = linear(u_x_bounds, 1., screen.x);
+  float y = linear(u_y_bounds, 1., screen.y);
+  return x >= 0.0 && x <= 1.0 && y >= 0.0 && y <= 1.0;
+}
+
 //
 // Entrypoint
 //
@@ -501,6 +515,9 @@ vec4 u8_r_range(float alpha) {
 void main() {
   if (u_tile_fmt == 32) {
     color = u32_rgba_map(u_draw_mode);
+  }
+  else if (!in_tile_bounds(uv)) {
+    color = vec4(0.);
   }
   else if (u_tile_fmt == 8) {
     color = u8_r_range(0.9);

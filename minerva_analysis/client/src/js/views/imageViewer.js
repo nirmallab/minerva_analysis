@@ -242,10 +242,25 @@ class ImageViewer {
             const sub_url = group[group.length - 3];
             const centerProps = selectCenterProps(e.tile, source);
 
-            if (tileFormat == 32 && e.tile._renderedContext) {
-                const w = e.rendered.canvas.width;
-                const h = e.rendered.canvas.height;
+            // Clear the rendered tile up front so every early return below
+            // (missing data, outlines disabled, ...) leaves a properly blank
+            // tile instead of whatever pixels were last drawn into this
+            // canvas -- previously the clear happened after these guards,
+            // so a skipped tile kept showing stale (or, before the
+            // gl.texImage2D(undefined) bug below was fixed, garbage) content
+            // from its last successful draw. Label/segmentation tiles must
+            // stay transparent outside outlines so image channels underneath
+            // remain visible.
+            const w = e.rendered.canvas.width;
+            const h = e.rendered.canvas.height;
+            if (tileFormat == 32) {
                 e.rendered.clearRect(0, 0, w, h);
+            } else {
+                e.rendered.fillStyle = "black";
+                e.rendered.fillRect(0, 0, w, h);
+            }
+
+            if (tileFormat == 32 && e.tile._renderedContext) {
                 if (labelOutlinesEnabled()) {
                     e.rendered.drawImage(e.tile._renderedContext.canvas, 0, 0, w, h);
                 }
@@ -253,6 +268,18 @@ class ImageViewer {
             }
 
             if (tileFormat != 32) {
+                if (!e.tile._array) {
+                    // Not loaded yet -- e.g. right after the HD toggle forces
+                    // every visible tile to redraw immediately, before the
+                    // freshly-invalidated tile's fetch/decode has finished.
+                    // Falling through with pixels=undefined would still reach
+                    // gl.texImage2D below, which allocates the texture with
+                    // whatever GPU memory happened to be there -- rendered as
+                    // solid static instead of skipping this frame like the
+                    // segmentation branch below already does.
+                    console.warn("Missing Array for tile:", e.tile.getUrl(), "- skipping rendering");
+                    return;
+                }
                 const channel = findCurrentChannel(sub_url);
                 const range = _.get(channel, "range", floatRange);
                 const color = _.get(channel, "color", d3.color("white"));
@@ -288,17 +315,6 @@ class ImageViewer {
                     range_2fv: new Float32Array([0, 1]),
                     fmt_1i: 32,
                 };
-            }
-
-            // Clear the rendered tile. Label/segmentation tiles must stay
-            // transparent outside outlines so the image channels remain visible.
-            var w = e.rendered.canvas.width;
-            var h = e.rendered.canvas.height;
-            if (tileFormat == 32) {
-                e.rendered.clearRect(0, 0, w, h);
-            } else {
-                e.rendered.fillStyle = "black";
-                e.rendered.fillRect(0, 0, w, h);
             }
 
             // Start webGL rendering

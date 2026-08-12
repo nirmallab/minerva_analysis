@@ -214,21 +214,20 @@
     <div class="quick-view-card">
         <span class="sidebar-kicker">Minerva</span>
         <h1>Take a Quick Look</h1>
-        <p class="quick-view-subtitle">Paste the full path to a local image. It opens straight in the viewer -- no setup required.</p>
-
-        <label for="quick_view_path_input" class="quick-view-path-label">Image file path</label>
-        <div class="quick-view-path-row">
-            <input id="quick_view_path_input" type="text" autocomplete="off" spellcheck="false" placeholder="C:\path\to\image.ome.tif">
-            <button id="quick_view_path_load" class="sidebar-action" type="button" disabled>Load</button>
-        </div>
-
-        <div class="quick-view-divider"><span>or</span></div>
+        <p class="quick-view-subtitle">Open a local image. It loads straight into the viewer -- no setup required.</p>
 
         <div id="quick_view_dropzone" class="quick-view-dropzone" tabindex="0">
-            <span class="fas fa-cloud-arrow-up quick-view-dropzone-icon"></span>
-            <div class="quick-view-dropzone-text">Drag a file here, or click to browse</div>
-            <div class="quick-view-dropzone-hint">Fills in the filename above -- browsers can't reveal the full folder path, so add that part yourself</div>
-            <input id="quick_view_file_input" type="file" accept=".tif,.tiff,.png,.jpg,.jpeg" hidden>
+            <span class="fas fa-folder-open quick-view-dropzone-icon"></span>
+            <div class="quick-view-dropzone-text">Click here to open an image</div>
+            <div class="quick-view-dropzone-hint">Opens a file browser on this machine</div>
+        </div>
+
+        <div id="quick_view_path_fallback" class="quick-view-path-fallback" hidden>
+            <label for="quick_view_path_input" class="quick-view-path-label">Image file path</label>
+            <div class="quick-view-path-row">
+                <input id="quick_view_path_input" type="text" autocomplete="off" spellcheck="false" placeholder="C:\path\to\image.ome.tif">
+                <button id="quick_view_path_load" class="sidebar-action" type="button" disabled>Load</button>
+            </div>
         </div>
 
         <div id="quick_view_status" class="quick-view-status" hidden></div>

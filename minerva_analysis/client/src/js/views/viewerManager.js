@@ -198,11 +198,25 @@ export class ViewerManager {
      * units (HD mode) -- a plain window event because viewerSidebar.js is a
      * raw <script>, not an ES module, so it can't import tileQuality here
      * directly.
+     *
+     * Just flipping the flag and clearing OpenSeadragon's shared tile cache
+     * isn't enough: each TiledImage also keeps its own per-address Tile
+     * cache (tilesMatrix), and invalidating that in place left stale/
+     * recycled tile canvases on screen without OpenSeadragon ever
+     * re-invoking tile-drawing to repaint them (visible as leftover static
+     * from whatever was on screen at the moment of the toggle). Removing
+     * and re-adding every active channel sidesteps that entirely by making
+     * OpenSeadragon build a brand new TiledImage for each one -- the same
+     * thing that already happens (and reliably works) when a channel gets
+     * toggled off and back on.
      * @param enabled - true for HD (16-bit), false for the fast/default WebP path
      */
     setHdMode(enabled) {
         tileQuality.hd = enabled;
-        this.imageViewer.clearTileCache(false);
+        Object.keys(this.channelList.currentChannels).map(Number).forEach((srcIdx) => {
+            this.channel_remove(srcIdx);
+            this.channel_add(srcIdx);
+        });
         window.dispatchEvent(new CustomEvent("minerva:hd-mode-changed", { detail: { enabled } }));
     }
 
